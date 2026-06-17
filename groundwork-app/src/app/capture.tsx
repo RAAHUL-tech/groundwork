@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -14,6 +15,7 @@ import * as ImagePicker from 'expo-image-picker';
 import Animated, { FadeIn, FadeInDown, FadeInRight } from 'react-native-reanimated';
 import { Colors } from '@/constants/colors';
 import { ScreenHeader, SectionLabel, PrimaryButton } from '@/components';
+import { uploadLibraryAssets } from '@/services/upload';
 
 type PickedAsset = ImagePicker.ImagePickerAsset;
 
@@ -123,6 +125,8 @@ function ThumbnailStrip({
 // ─── Screen ───────────────────────────────────────────────────────────────────
 export default function CaptureScreen() {
   const [selectedAssets, setSelectedAssets] = useState<PickedAsset[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
 
   const openLibrary = useCallback(async () => {
     // Always request permission imperatively — hooks don't reliably
@@ -159,13 +163,30 @@ export default function CaptureScreen() {
     setSelectedAssets((prev) => prev.filter((a) => a.uri !== uri));
   }, []);
 
-  const handleAnalyzeLibrary = useCallback(() => {
-    if (selectedAssets.length === 0) return;
-    router.push({
-      pathname: '/scanning' as any,
-      params: { captureMode: 'library', count: selectedAssets.length },
-    });
-  }, [selectedAssets]);
+  const handleAnalyzeLibrary = useCallback(async () => {
+    if (selectedAssets.length === 0 || uploading) return;
+
+    try {
+      setUploading(true);
+      setUploadProgress(`Uploading ${selectedAssets.length} file${selectedAssets.length !== 1 ? 's' : ''}…`);
+
+      const { jobId } = await uploadLibraryAssets(selectedAssets);
+
+      setUploadProgress('Starting analysis…');
+      router.push({
+        pathname: '/scanning' as any,
+        params: { captureMode: 'library', jobId },
+      });
+    } catch (err: any) {
+      Alert.alert(
+        'Upload Failed',
+        err?.message ?? 'Could not upload files. Check your connection and try again.'
+      );
+    } finally {
+      setUploading(false);
+      setUploadProgress('');
+    }
+  }, [selectedAssets, uploading]);
 
   const handleLiveCapture = useCallback(() => {
     router.push('/camera');
@@ -249,10 +270,18 @@ export default function CaptureScreen() {
       {/* Sticky analyze CTA */}
       {canAnalyze && (
         <Animated.View entering={FadeInDown.duration(350)} style={styles.ctaWrap}>
-          <PrimaryButton
-            label={`Analyze ${selectedAssets.length} Item${selectedAssets.length !== 1 ? 's' : ''}`}
-            onPress={handleAnalyzeLibrary}
-          />
+          {uploading ? (
+            <View style={styles.uploadingRow}>
+              <ActivityIndicator color={Colors.primary} />
+              <Text style={styles.uploadingText}>{uploadProgress}</Text>
+            </View>
+          ) : (
+            <PrimaryButton
+              label={`Analyze ${selectedAssets.length} Item${selectedAssets.length !== 1 ? 's' : ''}`}
+              onPress={handleAnalyzeLibrary}
+              disabled={uploading}
+            />
+          )}
         </Animated.View>
       )}
     </SafeAreaView>
@@ -348,4 +377,9 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: Colors.border,
     backgroundColor: Colors.background,
   },
+  uploadingRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    justifyContent: 'center', paddingVertical: 18,
+  },
+  uploadingText: { fontSize: 15, fontWeight: '600', color: Colors.textMuted },
 });

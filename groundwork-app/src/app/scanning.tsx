@@ -15,6 +15,8 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Colors } from '@/constants/colors';
 import { LogoMark } from '@/components';
+import { groundworkApi } from '@/services/api';
+import { setEstimateResult } from '@/services/estimateStore';
 
 type StepStatus = 'pending' | 'active' | 'done';
 
@@ -143,30 +145,34 @@ function StepRow({ step, status, index }: { step: Step; status: StepStatus; inde
 }
 
 export default function ScanningScreen() {
-  const { captureMode } = useLocalSearchParams<{ captureMode: string }>();
+  const { captureMode, jobId } = useLocalSearchParams<{ captureMode: string; jobId?: string }>();
   const [activeStep, setActiveStep] = useState(0);
   const [progress, setProgress] = useState(0);
   const progressAnim = useSharedValue(0);
   const elapsed = useRef(0);
   const frameRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const navigatedRef = useRef(false);
 
+  // Cosmetic animation — always runs regardless of polling
   useEffect(() => {
     const startTime = Date.now();
-
     const cumulativeDurations = STEPS.map((_, i) =>
       STEPS.slice(0, i + 1).reduce((sum, s) => sum + s.durationMs, 0)
     );
 
     frameRef.current = setInterval(() => {
       elapsed.current = Date.now() - startTime;
-      const pct = Math.min(elapsed.current / TOTAL_MS, 1);
-      setProgress(pct);
-      progressAnim.value = withTiming(pct, { duration: 80 });
+      // Cap at 95% — final 5% reserved for when polling confirms complete
+      const rawPct = Math.min(elapsed.current / TOTAL_MS, jobId ? 0.95 : 1);
+      setProgress(rawPct);
+      progressAnim.value = withTiming(rawPct, { duration: 80 });
 
       const nextStep = cumulativeDurations.findIndex((d) => elapsed.current < d);
-      setActiveStep(nextStep === -1 ? STEPS.length : nextStep);
+      setActiveStep(nextStep === -1 ? STEPS.length - 1 : nextStep);
 
-      if (elapsed.current >= TOTAL_MS) {
+      // No jobId → mock mode: navigate after animation finishes
+      if (!jobId && elapsed.current >= TOTAL_MS && !navigatedRef.current) {
+        navigatedRef.current = true;
         clearInterval(frameRef.current!);
         setTimeout(() => {
           router.push({ pathname: '/result' as any, params: { captureMode } });
@@ -176,6 +182,54 @@ export default function ScanningScreen() {
 
     return () => { if (frameRef.current) clearInterval(frameRef.current); };
   }, []);
+
+  // Real polling — fires only when we have a jobId
+  useEffect(() => {
+    if (!jobId) return;
+
+    let pollInterval: ReturnType<typeof setInterval>;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await groundworkApi.pollStatus(jobId);
+
+        if (cancelled) return;
+
+        if (res.status === 'complete' && res.result) {
+          setEstimateResult(res.result);
+          if (!navigatedRef.current) {
+            navigatedRef.current = true;
+            // Snap progress to 100% visually
+            setProgress(1);
+            progressAnim.value = withTiming(1, { duration: 300 });
+            clearInterval(pollInterval);
+            setTimeout(() => {
+              router.push({ pathname: '/result' as any, params: { captureMode } });
+            }, 400);
+          }
+        } else if (res.status === 'failed') {
+          clearInterval(pollInterval);
+          if (!navigatedRef.current) {
+            navigatedRef.current = true;
+            // Navigate anyway — result screen will show mock/error state
+            router.push({ pathname: '/result' as any, params: { captureMode } });
+          }
+        }
+      } catch {
+        // Network hiccup — keep polling
+      }
+    };
+
+    // First poll immediately, then every 2 seconds
+    poll();
+    pollInterval = setInterval(poll, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(pollInterval);
+    };
+  }, [jobId]);
 
   const progressBarStyle = useAnimatedStyle(() => ({
     width: `${progressAnim.value * 100}%`,

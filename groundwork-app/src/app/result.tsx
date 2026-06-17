@@ -12,6 +12,7 @@ import {
   confidenceColor,
   confidenceLabel,
 } from '@/components';
+import { getEstimateResult } from '@/services/estimateStore';
 
 // ─── Mock data ────────────────────────────────────────────────────────────────
 const MOCK_RESULT = {
@@ -33,6 +34,42 @@ const MOCK_RESULT = {
     { label: 'Lighting Fixtures', icon: '💡',  confidence: 0.86, quantity: 3,    unit: 'each'     },
   ],
 };
+
+// Map API label strings to display icons
+const ITEM_ICONS: Record<string, string> = {
+  cabinets: '🗄️', countertop: '🪨', countertops: '🪨',
+  sink: '🚰', dishwasher: '🍽️', refrigerator: '❄️', range: '🔥',
+  flooring: '⬜', windows: '🪟', window: '🪟',
+  lighting: '💡', toilet: '🚽', tub: '🛁', shower: '🚿',
+  vanity: '🪞', door: '🚪', paint: '🎨',
+};
+
+function iconForLabel(label: string): string {
+  const key = label.toLowerCase();
+  for (const [k, icon] of Object.entries(ITEM_ICONS)) {
+    if (key.includes(k)) return icon;
+  }
+  return '🔧';
+}
+
+// Normalise API result to the shape the UI expects
+function normaliseResult(raw: ReturnType<typeof getEstimateResult>) {
+  if (!raw) return MOCK_RESULT;
+  return {
+    room_type: raw.room_type.charAt(0).toUpperCase() + raw.room_type.slice(1).replace('_', ' '),
+    room_confidence: raw.room_confidence,
+    condition: (raw.condition ?? 'fair') as 'poor' | 'fair' | 'good' | 'excellent',
+    condition_notes: raw.condition_notes ?? '',
+    scope_observations: raw.scope_narrative ?? '',
+    detected_items: (raw.detected_items ?? []).map((item) => ({
+      label: item.label.charAt(0).toUpperCase() + item.label.slice(1).replace(/_/g, ' '),
+      icon: iconForLabel(item.label),
+      confidence: item.confidence,
+      quantity: item.quantity ?? 0,
+      unit: item.unit ?? '',
+    })),
+  };
+}
 
 type Condition = 'poor' | 'fair' | 'good' | 'excellent';
 
@@ -109,7 +146,7 @@ function DetectedItem({
 // ─── Screen ───────────────────────────────────────────────────────────────────
 export default function ResultScreen() {
   const { captureMode } = useLocalSearchParams<{ captureMode: string }>();
-  const result = MOCK_RESULT;
+  const result = normaliseResult(getEstimateResult());
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
