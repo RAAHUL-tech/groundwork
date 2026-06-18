@@ -13,7 +13,7 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
-MAX_FRAMES = 5
+MAX_FRAMES = 4
 FFMPEG_TIMEOUT = 90   # seconds
 
 
@@ -98,6 +98,49 @@ def _extract(
 
         logger.info("[video] extracted %d frame(s) from video", len(frames))
         return frames
+
+
+def extract_audio_bytes_from_s3(s3_video_key: str) -> bytes:
+    """
+    Download a video from S3 and extract its audio track as a 16-kHz mono WAV.
+    Returns WAV bytes ready for Whisper transcription.
+    Raises on download failure or ffmpeg error.
+    """
+    from services.s3_storage import download_bytes
+
+    logger.info("[video] extracting audio from s3 key: %s", s3_video_key)
+    video_bytes = download_bytes(s3_video_key)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        video_path = os.path.join(tmpdir, 'input.mp4')
+        audio_path = os.path.join(tmpdir, 'audio.wav')
+
+        with open(video_path, 'wb') as f:
+            f.write(video_bytes)
+
+        result = subprocess.run(
+            [
+                'ffmpeg', '-i', video_path,
+                '-vn',               # strip video track
+                '-ar', '16000',      # 16 kHz — Whisper's native sample rate
+                '-ac', '1',          # mono
+                '-acodec', 'pcm_s16le',  # uncompressed WAV
+                audio_path, '-y',
+            ],
+            capture_output=True,
+            timeout=FFMPEG_TIMEOUT,
+        )
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg audio extraction failed: {result.stderr.decode()[-300:]}"
+            )
+
+        with open(audio_path, 'rb') as f:
+            audio_bytes = f.read()
+
+    logger.info("[video] extracted %d bytes of audio", len(audio_bytes))
+    return audio_bytes
 
 
 def _probe_duration(video_path: str) -> float | None:

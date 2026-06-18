@@ -12,6 +12,15 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Pre-download Whisper small model so first /transcribe call is instant
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
+
+# Pre-download YOLOv8s weights (~22 MB)
+RUN python -c "from ultralytics import YOLO; YOLO('yolov8s.pt')"
+
+# Pre-download Depth Anything V2 Small (~98 MB)
+RUN python -c "from transformers import pipeline; pipeline(task='depth-estimation', model='depth-anything/Depth-Anything-V2-Small-hf', device='cpu')"
+
 ENV FLASK_APP=app.py
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1

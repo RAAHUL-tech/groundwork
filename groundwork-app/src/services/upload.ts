@@ -39,15 +39,16 @@ export async function uploadCameraPhoto(
   // 2. PUT file bytes directly to S3 (bypasses Flask server)
   await putToS3(uri, presign.upload_url, contentType);
 
-  // 3. Confirm → enqueues vision pipeline Celery task
-  const confirm = await groundworkApi.confirm({
+  // 3. Start vision pipeline → enqueues Celery task
+  const job = await groundworkApi.startEstimate({
     s3_key: presign.s3_key,
     room_scan_id: presign.room_scan_id,
+    project_id: options?.projectId,
     tier: 'standard',
     voice_transcript: options?.voiceTranscript,
   });
 
-  return { jobId: confirm.job_id, roomScanId: presign.room_scan_id };
+  return { jobId: job.job_id, roomScanId: presign.room_scan_id };
 }
 
 // ─── Multiple images (library picker) ────────────────────────────────────────
@@ -62,45 +63,55 @@ export async function uploadLibraryAssets(
   assets: LibraryAsset[],
   options?: { projectId?: string; roomLabel?: string; voiceTranscript?: string }
 ): Promise<UploadResult> {
-  // Presign + upload in parallel, capped at 5 concurrent to avoid rate limits
-  const batches = chunk(assets, 5);
-  const allKeys: string[] = [];
-  let firstRoomScanId: string | null = null;
+  if (assets.length === 0) {
+    throw new Error('No assets to upload');
+  }
 
+  const allKeys: string[] = [];
+  let roomScanId: string | null = null;
+
+  // First asset creates the room_scan; remaining assets reuse it
+  const first = assets[0];
+  const firstContentType = resolveContentType(first);
+  const firstPresign = await groundworkApi.presign({
+    file_name: first.uri.split('/').pop() ?? 'file',
+    content_type: firstContentType,
+    project_id: options?.projectId,
+    room_label: options?.roomLabel,
+  });
+  await putToS3(first.uri, firstPresign.upload_url, firstContentType);
+  allKeys.push(firstPresign.s3_key);
+  roomScanId = firstPresign.room_scan_id;
+
+  const rest = assets.slice(1);
+  const batches = chunk(rest, 5);
   for (const batch of batches) {
     const results = await Promise.all(
       batch.map(async (asset) => {
         const contentType = resolveContentType(asset);
-        const fileName = asset.uri.split('/').pop() ?? 'file';
-
         const presign = await groundworkApi.presign({
-          file_name: fileName,
+          file_name: asset.uri.split('/').pop() ?? 'file',
           content_type: contentType,
           project_id: options?.projectId,
           room_label: options?.roomLabel,
+          room_scan_id: roomScanId ?? undefined,
         });
-
         await putToS3(asset.uri, presign.upload_url, contentType);
-
-        return { s3_key: presign.s3_key, room_scan_id: presign.room_scan_id };
+        return presign.s3_key;
       })
     );
-
-    for (const r of results) {
-      allKeys.push(r.s3_key);
-      if (!firstRoomScanId) firstRoomScanId = r.room_scan_id;
-    }
+    allKeys.push(...results);
   }
 
-  // Single confirm — pipeline processes all keys together
-  const confirm = await groundworkApi.confirm({
+  const job = await groundworkApi.startEstimate({
     s3_keys: allKeys,
-    room_scan_id: firstRoomScanId,
+    room_scan_id: roomScanId,
+    project_id: options?.projectId,
     tier: 'standard',
     voice_transcript: options?.voiceTranscript,
   });
 
-  return { jobId: confirm.job_id, roomScanId: firstRoomScanId };
+  return { jobId: job.job_id, roomScanId };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -19,6 +19,9 @@ import { uploadLibraryAssets } from '@/services/upload';
 
 type PickedAsset = ImagePicker.ImagePickerAsset;
 
+const MAX_PHOTOS = 5;
+const MAX_VIDEOS = 1;
+
 // ─── Option card ──────────────────────────────────────────────────────────────
 function OptionCard({
   icon,
@@ -129,35 +132,58 @@ export default function CaptureScreen() {
   const [uploadProgress, setUploadProgress] = useState('');
 
   const openLibrary = useCallback(async () => {
-    // Always request permission imperatively — hooks don't reliably
-    // trigger the native dialog on all platforms in SDK 56.
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    // PHPickerViewController (iOS 14+) handles privacy internally — no permission request needed.
+    // Calling requestMediaLibraryPermissionsAsync() crashes if NSPhotoLibraryUsageDescription
+    // is absent from Info.plist; skipping it entirely avoids that native crash.
 
-    if (status !== 'granted') {
+    // Calculate remaining slots based on what's already selected
+    const existingPhotos = selectedAssets.filter((a) => a.type !== 'video').length;
+    const existingVideos = selectedAssets.filter((a) => a.type === 'video').length;
+    const remainingPhotos = MAX_PHOTOS - existingPhotos;
+    const remainingVideos = MAX_VIDEOS - existingVideos;
+
+    if (remainingPhotos <= 0 && remainingVideos <= 0) {
       Alert.alert(
-        'Photo Library Access Required',
-        'To upload photos or videos, please allow Groundwork to access your photo library.\n\nGo to Settings → Groundwork → Photos and select "All Photos".',
-        [{ text: 'OK' }]
+        'Limit Reached',
+        `You've already selected the maximum (${MAX_PHOTOS} photos, ${MAX_VIDEOS} video).`
       );
       return;
     }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      allowsMultipleSelection: true,
-      selectionLimit: 10,
-      quality: 0.85,
-      // orderedSelection is iOS-only and crashes on Android — omitted
-    });
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        allowsMultipleSelection: true,
+        selectionLimit: remainingPhotos + remainingVideos,
+        // No quality/compression — avoids video transcoding crash on physical device
+        exif: false,
+      });
 
-    if (!result.canceled && result.assets.length > 0) {
+      if (result.canceled || result.assets.length === 0) return;
+
+      // Enforce per-type limits from the new selection
+      const newPhotos = result.assets.filter((a) => a.type !== 'video');
+      const newVideos = result.assets.filter((a) => a.type === 'video');
+      const photosToAdd = newPhotos.slice(0, remainingPhotos);
+      const videosToAdd = newVideos.slice(0, remainingVideos);
+      const toAdd = [...photosToAdd, ...videosToAdd];
+
+      if (toAdd.length < result.assets.length) {
+        Alert.alert(
+          'Some Items Skipped',
+          `Only ${toAdd.length} of ${result.assets.length} selected items were added (max ${MAX_PHOTOS} photos, ${MAX_VIDEOS} video).`
+        );
+      }
+
       setSelectedAssets((prev) => {
         const existing = new Set(prev.map((a) => a.uri));
-        const fresh = result.assets.filter((a) => !existing.has(a.uri));
+        const fresh = toAdd.filter((a) => !existing.has(a.uri));
         return [...prev, ...fresh];
       });
+    } catch (err: any) {
+      Alert.alert('Could Not Open Library', err?.message ?? 'Please try again.');
     }
-  }, []);
+  }, [selectedAssets]);
 
   const removeAsset = useCallback((uri: string) => {
     setSelectedAssets((prev) => prev.filter((a) => a.uri !== uri));
@@ -232,7 +258,7 @@ export default function CaptureScreen() {
         <OptionCard
           icon="🖼️"
           title="Upload from Library"
-          description="Pick existing photos or videos from your camera roll. Select multiple for better coverage."
+          description={`Pick photos or a video from your camera roll. Up to ${MAX_PHOTOS} photos and ${MAX_VIDEOS} video.`}
           onPress={openLibrary}
           active={selectedAssets.length > 0}
           badge={selectedAssets.length > 0 ? `${selectedAssets.length} selected` : undefined}

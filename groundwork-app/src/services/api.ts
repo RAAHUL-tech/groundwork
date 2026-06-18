@@ -1,3 +1,4 @@
+import * as FileSystem from 'expo-file-system/legacy';
 import { API_BASE_URL } from '@/constants/api';
 
 // ─── Generic fetch wrapper ────────────────────────────────────────────────────
@@ -28,7 +29,7 @@ export interface PresignResponse {
   expires_in: number;
 }
 
-export interface ConfirmResponse {
+export interface EstimateJobResponse {
   job_id: string;
   status: string;
   poll_url: string;
@@ -74,8 +75,9 @@ export interface EstimateResult {
 export interface DetectedItem {
   label: string;
   confidence: number;
-  quantity: number;
+  quantity: number | null;
   unit: string;
+  bounding_box?: { x: number; y: number; w: number; h: number };
 }
 
 export interface VoiceScopeItem {
@@ -105,6 +107,7 @@ export const groundworkApi = {
     content_type: string;
     project_id?: string;
     room_label?: string;
+    room_scan_id?: string;
   }) {
     return request<PresignResponse>('/upload/presign', {
       method: 'POST',
@@ -112,8 +115,11 @@ export const groundworkApi = {
     });
   },
 
-  /** Step 3: Confirm upload done → enqueue vision pipeline. */
-  confirm(body: {
+  /**
+   * Step 3: After S3 upload completes, start the vision pipeline.
+   * Replaces the old /upload/confirm endpoint.
+   */
+  startEstimate(body: {
     s3_key?: string;
     s3_keys?: string[];
     room_scan_id?: string | null;
@@ -121,8 +127,9 @@ export const groundworkApi = {
     zip_code?: string;
     voice_transcript?: string;
     room_hints?: string[];
+    project_id?: string;
   }) {
-    return request<ConfirmResponse>('/upload/confirm', {
+    return request<EstimateJobResponse>('/estimate', {
       method: 'POST',
       body: JSON.stringify(body),
     });
@@ -131,6 +138,34 @@ export const groundworkApi = {
   /** Poll for Celery task result. */
   pollStatus(jobId: string) {
     return request<JobStatusResponse>(`/estimate/status/${jobId}`);
+  },
+
+  /**
+   * Upload an audio file and get a Whisper transcript back.
+   * Uses FileSystem.uploadAsync (native multipart) — RN 0.76 FormData no longer
+   * supports the {uri, type, name} object shorthand for file parts.
+   */
+  async transcribeAudio(audioUri: string): Promise<string> {
+    const fileName = audioUri.split('/').pop() ?? 'voice.m4a';
+    const ext = fileName.includes('.') ? fileName.split('.').pop()! : 'm4a';
+
+    const result = await FileSystem.uploadAsync(
+      `${API_BASE_URL}/transcribe`,
+      audioUri,
+      {
+        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+        fieldName: 'audio',
+        mimeType: `audio/${ext}`,
+        httpMethod: 'POST',
+      },
+    );
+
+    if (result.status < 200 || result.status >= 300) {
+      throw new Error(`Transcription failed (${result.status}): ${result.body}`);
+    }
+
+    const data = JSON.parse(result.body);
+    return (data.transcript as string) ?? '';
   },
 
   /** Health check — used to verify backend is reachable. */

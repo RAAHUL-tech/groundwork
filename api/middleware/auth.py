@@ -13,7 +13,7 @@ def _decode_token(token: str) -> dict:
     return jwt.decode(
         token,
         Config.SUPABASE_JWT_SECRET,
-        algorithms=['HS256'],
+        algorithms=['ES256'],
         audience='authenticated',
     )
 
@@ -23,12 +23,6 @@ def require_auth(f):
     Decorator that enforces Supabase JWT authentication.
 
     Sets g.user_id and g.user_email on success.
-
-    NOT applied to any routes in Phase 1 — wired up, ready to drop on.
-    Usage:
-        @estimate_bp.route('/estimate', methods=['POST'])
-        @require_auth          ← add this line in Phase 2
-        def create_estimate():
     """
     @wraps(f)
     def decorated(*args, **kwargs):

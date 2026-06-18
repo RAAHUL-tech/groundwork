@@ -1,5 +1,8 @@
 from celery import Celery
 from config import Config
+from logging_config import configure_logging
+
+configure_logging()
 
 celery_app = Celery(
     'groundwork',

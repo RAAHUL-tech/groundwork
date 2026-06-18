@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -10,8 +10,16 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { CameraView, CameraType, useCameraPermissions, useMicrophonePermissions, FlashMode } from 'expo-camera';
+import {
+  useAudioRecorder,
+  useAudioRecorderState,
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+} from 'expo-audio';
 import { Colors } from '@/constants/colors';
 import { uploadCameraPhoto } from '@/services/upload';
+import { groundworkApi } from '@/services/api';
 
 type CaptureMode = 'photo' | 'video';
 
@@ -22,19 +30,25 @@ function formatTime(seconds: number) {
 }
 
 export default function CameraScreen() {
-  const cameraRef = useRef<CameraView>(null);
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [micPermission, requestMicPermission] = useMicrophonePermissions();
 
   const [facing, setFacing] = useState<CameraType>('back');
   const [flash, setFlash] = useState<FlashMode>('off');
   const [mode, setMode] = useState<CaptureMode>('photo');
+  const [cameraReady, setCameraReady] = useState(false);
 
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoTimer, setVideoTimer] = useState(0);
-  const [isRecordingAudio, setIsRecordingAudio] = useState(false);
+
+  // expo-audio recorder — hook manages its own lifecycle
   const [audioTimer, setAudioTimer] = useState(0);
-  const [cameraReady, setCameraReady] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [audioTranscript, setAudioTranscript] = useState<string | null>(null);
+
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  // RecordingStatus (statusListener arg) has no isRecording field — use useAudioRecorderState instead
+  const recorderState = useAudioRecorderState(audioRecorder);
 
   // Upload state
   const [uploading, setUploading] = useState(false);
@@ -47,82 +61,116 @@ export default function CameraScreen() {
   }, [isRecordingVideo]);
 
   useEffect(() => {
-    if (!isRecordingAudio) { setAudioTimer(0); return; }
+    if (!recorderState.isRecording) { setAudioTimer(0); return; }
     const id = setInterval(() => setAudioTimer((t) => t + 1), 1000);
     return () => clearInterval(id);
-  }, [isRecordingAudio]);
+  }, [recorderState.isRecording]);
 
   const handleBack = useCallback(() => {
-    if (isRecordingVideo) cameraRef.current?.stopRecording();
+    if (isRecordingVideo) {
+      // cameraRef not needed — CameraView handles stop internally via its ref
+    }
+    if (recorderState.isRecording) {
+      audioRecorder.stop().catch(() => {});
+    }
     router.back();
-  }, [isRecordingVideo]);
+  }, [isRecordingVideo, recorderState.isRecording, audioRecorder]);
 
-  const toggleFlash = useCallback(() => {
-    setFlash((f) => (f === 'off' ? 'on' : 'off'));
-  }, []);
+  const toggleFlash = useCallback(() => setFlash((f) => (f === 'off' ? 'on' : 'off')), []);
+  const flipCamera = useCallback(() => setFacing((f) => (f === 'back' ? 'front' : 'back')), []);
 
-  const flipCamera = useCallback(() => {
-    setFacing((f) => (f === 'back' ? 'front' : 'back'));
-  }, []);
+  // ── Camera ref stored as a stable ref via CameraView's own ref prop ─────────
+  const [cameraRef, setCameraRef] = useState<CameraView | null>(null);
+
+  // ── Voice recording ─────────────────────────────────────────────────────────
+
+  const handleAudioToggle = useCallback(async () => {
+    if (recorderState.isRecording) {
+      // Stop → upload → transcribe
+      await audioRecorder.stop();
+      const uri = audioRecorder.uri;
+      if (!uri) return;
+
+      setIsTranscribing(true);
+      try {
+        const text = await groundworkApi.transcribeAudio(uri);
+        setAudioTranscript(text || null);
+        if (!text) Alert.alert('No Speech Detected', 'Try speaking closer to the microphone.');
+      } catch (err: any) {
+        Alert.alert(
+          'Transcription Failed',
+          err?.message ?? 'Could not reach the backend.',
+        );
+      } finally {
+        setIsTranscribing(false);
+      }
+    } else {
+      // Start recording
+      const { granted } = await requestRecordingPermissionsAsync();
+      if (!granted) {
+        Alert.alert('Microphone Needed', 'Allow microphone access to record voice scope notes.');
+        return;
+      }
+
+      await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      setAudioTranscript(null); // clear previous on new recording
+    }
+  }, [recorderState.isRecording, audioRecorder]);
+
+  // ── Camera capture ──────────────────────────────────────────────────────────
 
   const handleCapture = useCallback(async () => {
-    if (!cameraReady || !cameraRef.current || uploading) return;
+    if (!cameraReady || !cameraRef || uploading) return;
 
     if (mode === 'photo') {
       let photo;
       try {
-        photo = await cameraRef.current.takePictureAsync({ quality: 0.85 });
+        photo = await cameraRef.takePictureAsync({ quality: 0.85 });
       } catch {
         Alert.alert('Capture Failed', 'Could not take photo. Please try again.');
         return;
       }
-
       if (!photo?.uri) return;
 
       try {
         setUploading(true);
         setUploadStatus('Uploading photo…');
-        const { jobId } = await uploadCameraPhoto(photo.uri, 'image/jpeg');
-
+        const { jobId } = await uploadCameraPhoto(photo.uri, 'image/jpeg', {
+          voiceTranscript: audioTranscript ?? undefined,
+        });
         setUploadStatus('Starting analysis…');
         router.push({ pathname: '/scanning' as any, params: { captureMode: 'photo', jobId } });
       } catch (err: any) {
-        Alert.alert(
-          'Upload Failed',
-          err?.message ?? 'Could not upload photo. Check your connection and try again.'
-        );
+        Alert.alert('Upload Failed', err?.message ?? 'Could not upload photo. Check your connection.');
       } finally {
         setUploading(false);
         setUploadStatus('');
       }
-
     } else {
-      // Video capture
+      // Video recording
       if (isRecordingVideo) {
-        cameraRef.current.stopRecording();
+        cameraRef.stopRecording();
         return;
       }
 
-      // Ensure microphone permission before recording video with audio
       if (!micPermission?.granted) {
         const { granted } = await requestMicPermission();
         if (!granted) {
-          Alert.alert(
-            'Microphone Access',
-            'Microphone access lets Groundwork record your voice scope alongside the video. The video will be recorded without audio.',
-            [{ text: 'Continue Anyway' }, { text: 'Cancel', style: 'cancel' }]
-          );
-          // Continue anyway — video will be muted
+          Alert.alert('Microphone Access',
+            'Groundwork records your voice alongside the video for scope extraction.',
+            [{ text: 'Continue Anyway' }, { text: 'Cancel', style: 'cancel' }]);
         }
       }
 
       setIsRecordingVideo(true);
       let videoUri: string | undefined;
       try {
-        const recording = await cameraRef.current.recordAsync({ maxDuration: 30 });
+        const recording = await cameraRef.recordAsync({ maxDuration: 30 });
         videoUri = recording?.uri;
       } catch {
-        // stopRecording() is called externally — this may throw, that's fine
+        // stopRecording() called externally — may throw
       } finally {
         setIsRecordingVideo(false);
       }
@@ -132,8 +180,11 @@ export default function CameraScreen() {
       try {
         setUploading(true);
         setUploadStatus('Uploading video…');
-        const { jobId } = await uploadCameraPhoto(videoUri, 'video/mp4');
-
+        // Content-type: iOS records .mov, Android records .mp4
+        const contentType = videoUri.toLowerCase().endsWith('.mov')
+          ? 'video/quicktime'
+          : 'video/mp4';
+        const { jobId } = await uploadCameraPhoto(videoUri, contentType);
         setUploadStatus('Starting analysis…');
         router.push({ pathname: '/scanning' as any, params: { captureMode: 'video', jobId } });
       } catch (err: any) {
@@ -143,15 +194,11 @@ export default function CameraScreen() {
         setUploadStatus('');
       }
     }
-  }, [cameraReady, mode, isRecordingVideo, uploading]);
+  }, [cameraReady, cameraRef, mode, isRecordingVideo, uploading, audioTranscript, micPermission]);
 
-  const handleAudioToggle = useCallback(() => {
-    setIsRecordingAudio((prev) => !prev);
-  }, []);
+  // ── Permission gates ────────────────────────────────────────────────────────
 
-  if (!cameraPermission) {
-    return <View style={styles.permGate} />;
-  }
+  if (!cameraPermission) return <View style={styles.permGate} />;
 
   if (!cameraPermission.granted) {
     return (
@@ -173,10 +220,14 @@ export default function CameraScreen() {
     );
   }
 
+  // ── Render ──────────────────────────────────────────────────────────────────
+
+  const audioButtonBusy = isTranscribing || uploading;
+
   return (
     <View style={styles.container}>
       <CameraView
-        ref={cameraRef}
+        ref={setCameraRef}
         style={StyleSheet.absoluteFill}
         facing={facing}
         flash={flash}
@@ -198,7 +249,7 @@ export default function CameraScreen() {
           <Text style={styles.topBtnText}>✕</Text>
         </Pressable>
 
-        {(isRecordingVideo || isRecordingAudio) && (
+        {(isRecordingVideo || recorderState.isRecording) && (
           <View style={styles.recordingPill}>
             <View style={[styles.recDot, isRecordingVideo && styles.recDotRed]} />
             <Text style={styles.recTimer}>
@@ -212,6 +263,17 @@ export default function CameraScreen() {
           {flash === 'off' && <View style={styles.flashOff} />}
         </Pressable>
       </SafeAreaView>
+
+      {/* Transcript banner — shown once voice note is transcribed */}
+      {audioTranscript && !recorderState.isRecording && !isTranscribing && (
+        <View style={styles.transcriptBanner}>
+          <Text style={styles.transcriptIcon}>🎙️</Text>
+          <Text style={styles.transcriptText} numberOfLines={2}>{audioTranscript}</Text>
+          <Pressable onPress={() => setAudioTranscript(null)} hitSlop={8}>
+            <Text style={styles.transcriptClear}>✕</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* Bottom controls */}
       <SafeAreaView style={styles.bottomOverlay} edges={['bottom']}>
@@ -230,22 +292,45 @@ export default function CameraScreen() {
         </View>
 
         {mode === 'video' && !isRecordingVideo && (
-          <Text style={styles.hint}>15–30 sec walkthrough for best results</Text>
+          <Text style={styles.hint}>15–30 sec walkthrough · speak while recording</Text>
         )}
-        {mode === 'photo' && !isRecordingVideo && (
-          <Text style={styles.hint}>Capture the full room in frame</Text>
+        {mode === 'photo' && !isRecordingVideo && !recorderState.isRecording && !audioTranscript && (
+          <Text style={styles.hint}>Record a voice note first, then capture the room</Text>
+        )}
+        {mode === 'photo' && !!audioTranscript && (
+          <Text style={styles.hintGreen}>Voice note ready · now capture the room</Text>
         )}
 
         <View style={styles.controlsRow}>
+          {/* Voice button */}
           <Pressable
-            style={[styles.sideBtn, isRecordingAudio && styles.sideBtnActive]}
+            style={[
+              styles.sideBtn,
+              recorderState.isRecording && styles.sideBtnRecording,
+              !!audioTranscript && !recorderState.isRecording && styles.sideBtnDone,
+            ]}
             onPress={handleAudioToggle}
-            disabled={uploading}
+            disabled={audioButtonBusy || isRecordingVideo}
           >
-            <Text style={styles.sideBtnIcon}>🎙️</Text>
-            <Text style={styles.sideBtnLabel}>{isRecordingAudio ? 'Stop' : 'Voice'}</Text>
+            {isTranscribing ? (
+              <ActivityIndicator size="small" color={Colors.white} style={{ height: 26 }} />
+            ) : (
+              <Text style={styles.sideBtnIcon}>
+                {recorderState.isRecording ? '⏹️' : audioTranscript ? '✅' : '🎙️'}
+              </Text>
+            )}
+            <Text style={styles.sideBtnLabel}>
+              {isTranscribing
+                ? 'Transcribing…'
+                : recorderState.isRecording
+                  ? 'Stop'
+                  : audioTranscript
+                    ? 'Re-record'
+                    : 'Voice'}
+            </Text>
           </Pressable>
 
+          {/* Capture button */}
           <Pressable
             style={[
               styles.captureBtn,
@@ -264,13 +349,15 @@ export default function CameraScreen() {
             )}
           </Pressable>
 
+          {/* Flip button */}
           <Pressable style={styles.sideBtn} onPress={flipCamera} disabled={uploading}>
             <Text style={styles.sideBtnIcon}>🔄</Text>
             <Text style={styles.sideBtnLabel}>Flip</Text>
           </Pressable>
         </View>
 
-        {isRecordingAudio && (
+        {/* Live recording waveform */}
+        {recorderState.isRecording && (
           <View style={styles.audioIndicator}>
             <View style={styles.audioWave}>
               {[0.4, 0.8, 1.0, 0.7, 0.5].map((h, i) => (
@@ -278,7 +365,7 @@ export default function CameraScreen() {
               ))}
             </View>
             <Text style={styles.audioIndicatorText}>
-              Voice note recording — tap 🎙️ to stop
+              Recording voice note — tap Stop when done
             </Text>
           </View>
         )}
@@ -290,22 +377,13 @@ export default function CameraScreen() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
 
-  // Upload overlay (full-screen dimmer while uploading)
   uploadOverlay: {
     ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0,0,0,0.75)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 16,
-    zIndex: 20,
+    alignItems: 'center', justifyContent: 'center', gap: 16, zIndex: 20,
   },
-  uploadOverlayText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: Colors.white,
-  },
+  uploadOverlayText: { fontSize: 16, fontWeight: '600', color: Colors.white },
 
-  // Permission gate
   permGate: {
     flex: 1, backgroundColor: Colors.background, alignItems: 'center', justifyContent: 'center',
   },
@@ -320,7 +398,6 @@ const styles = StyleSheet.create({
   permButtonText: { fontSize: 16, fontWeight: '700', color: Colors.white },
   permBack: { fontSize: 15, color: Colors.textMuted, marginTop: 4 },
 
-  // Top bar
   topBar: {
     position: 'absolute', top: 0, left: 0, right: 0,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -344,7 +421,17 @@ const styles = StyleSheet.create({
   recDotRed: { backgroundColor: Colors.error },
   recTimer: { fontSize: 15, fontWeight: '700', color: Colors.white, fontVariant: ['tabular-nums'] },
 
-  // Bottom overlay
+  transcriptBanner: {
+    position: 'absolute', left: 16, right: 16, bottom: 220,
+    flexDirection: 'row', alignItems: 'center', gap: 10,
+    backgroundColor: 'rgba(0,0,0,0.82)', borderRadius: 14,
+    paddingHorizontal: 14, paddingVertical: 10,
+    borderWidth: 1, borderColor: Colors.primary + '66', zIndex: 10,
+  },
+  transcriptIcon: { fontSize: 18 },
+  transcriptText: { flex: 1, fontSize: 13, color: Colors.white, lineHeight: 18 },
+  transcriptClear: { fontSize: 14, color: 'rgba(255,255,255,0.5)', fontWeight: '700' },
+
   bottomOverlay: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
     backgroundColor: 'rgba(0,0,0,0.75)', paddingTop: 20, paddingBottom: 8, gap: 12, zIndex: 10,
@@ -358,15 +445,17 @@ const styles = StyleSheet.create({
   modeTabText: { fontSize: 13, fontWeight: '700', color: 'rgba(255,255,255,0.6)', letterSpacing: 0.8 },
   modeTabTextActive: { color: Colors.background },
   hint: { fontSize: 13, color: 'rgba(255,255,255,0.5)', textAlign: 'center', paddingHorizontal: 24 },
+  hintGreen: { fontSize: 13, color: 'rgba(74,222,128,0.85)', textAlign: 'center', paddingHorizontal: 24, fontWeight: '600' },
 
   controlsRow: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around',
     paddingHorizontal: 32, paddingVertical: 8,
   },
   sideBtn: { alignItems: 'center', gap: 4, width: 64, paddingVertical: 8, borderRadius: 12 },
-  sideBtnActive: { backgroundColor: 'rgba(255, 99, 71, 0.25)' },
+  sideBtnRecording: { backgroundColor: 'rgba(239,68,68,0.25)' },
+  sideBtnDone: { backgroundColor: 'rgba(34,197,94,0.20)' },
   sideBtnIcon: { fontSize: 26 },
-  sideBtnLabel: { fontSize: 12, color: 'rgba(255,255,255,0.7)', fontWeight: '600' },
+  sideBtnLabel: { fontSize: 11, color: 'rgba(255,255,255,0.7)', fontWeight: '600', textAlign: 'center' },
 
   captureBtn: {
     width: 80, height: 80, borderRadius: 40,

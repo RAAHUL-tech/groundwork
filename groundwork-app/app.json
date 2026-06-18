@@ -9,7 +9,11 @@
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/expo.icon",
-      "bundleIdentifier": "com.rahulkrish28.groundwork-app"
+      "bundleIdentifier": "com.rahulkrish28.groundwork-app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false,
+        "NSPhotoLibraryUsageDescription": "Groundwork uses your photo library to analyze room photos and videos."
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -55,7 +59,8 @@
             "imageWidth": 76
           }
         }
-      ]
+      ],
+      "expo-audio"
     ],
     "experiments": {
       "typedRoutes": true,

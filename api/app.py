@@ -1,9 +1,16 @@
-from flask import Flask, jsonify
+import logging
+import time
+
+from flask import Flask, jsonify, g, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
 from config import Config
+from logging_config import configure_logging
+
+configure_logging()
+logger = logging.getLogger(__name__)
 
 # Shared limiter instance — imported by routes that need per-endpoint limits
 limiter = Limiter(
@@ -34,11 +41,34 @@ def create_app() -> Flask:
     from routes.proposal import proposal_bp
     from routes.rooms import rooms_bp
     from routes.upload import upload_bp
+    from routes.transcribe import transcribe_bp
 
     app.register_blueprint(estimate_bp)
     app.register_blueprint(proposal_bp)
     app.register_blueprint(rooms_bp)
     app.register_blueprint(upload_bp)
+    app.register_blueprint(transcribe_bp)
+
+    # ── Request / response logging ────────────────────────────────────────────
+    @app.before_request
+    def _log_request():
+        g._req_start = time.monotonic()
+        body_preview = ''
+        if request.is_json:
+            raw = request.get_data(as_text=True)
+            # Mask base64 blobs — they're huge and useless in logs
+            import re
+            raw = re.sub(r'"[A-Za-z0-9+/]{60,}={0,2}"', '"<base64>"', raw)
+            body_preview = raw[:300] + ('…' if len(raw) > 300 else '')
+        logger.info('→ %s %s  body=%s', request.method, request.path, body_preview or '(none)')
+
+    @app.after_request
+    def _log_response(response):
+        ms = (time.monotonic() - g.get('_req_start', time.monotonic())) * 1000
+        level = logging.WARNING if response.status_code >= 400 else logging.INFO
+        logger.log(level, '← %s %s  status=%d  %.0fms',
+                   request.method, request.path, response.status_code, ms)
+        return response
 
     # ── Health check ──────────────────────────────────────────────────────────
     @app.get('/health')

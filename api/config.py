@@ -36,8 +36,12 @@ class Config:
     AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
     AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY', '')
     S3_BUCKET = os.getenv('S3_BUCKET', 'groundwork-uploads')
-    S3_REGION = os.getenv('S3_REGION', 'us-west-2')
+    S3_REGION = os.getenv('S3_REGION', 'us-east-2')
 
     # Cache TTLs (seconds)
     ESTIMATE_CACHE_TTL = int(os.getenv('ESTIMATE_CACHE_TTL_SECONDS', '86400'))
     SERPAPI_CACHE_TTL = int(os.getenv('SERPAPI_CACHE_TTL_SECONDS', '21600'))
+
+    # Dev / testing fallback — hardcoded Supabase project used when no
+    # project_id is supplied by the client (testing without auth).
+    DEV_PROJECT_ID = os.getenv('DEV_PROJECT_ID', 'bcc766c8-36dc-4810-b333-457bde439440')

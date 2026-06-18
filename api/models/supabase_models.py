@@ -4,11 +4,14 @@ Supabase DB layer — typed CRUD functions for all tables.
 Uses the service role key, so RLS is bypassed.
 All public-facing auth checks happen at the Flask middleware layer.
 """
+import logging
 from typing import Optional
 from typing_extensions import TypedDict, NotRequired
 
 from supabase import create_client, Client
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 # ─── Singleton client ─────────────────────────────────────────────────────────
 
@@ -149,8 +152,11 @@ def create_room_scan(project_id: Optional[str] = None, **kwargs) -> RoomScanRow:
     row: dict = {**kwargs}
     if project_id:
         row['project_id'] = project_id
+    logger.info("[db] INSERT room_scans  project_id=%s  status=%s", project_id, row.get('status'))
     result = get_db().table('room_scans').insert(row).execute()
-    return result.data[0]
+    scan = result.data[0]
+    logger.info("[db] ✓ room_scan created  id=%s", scan['id'])
+    return scan
 
 
 def get_room_scan(room_scan_id: str) -> Optional[RoomScanRow]:
@@ -176,12 +182,15 @@ def get_room_scan_by_job(celery_job_id: str) -> Optional[RoomScanRow]:
 
 
 def update_room_scan(room_scan_id: str, **kwargs) -> Optional[RoomScanRow]:
+    logger.info("[db] UPDATE room_scans  id=%s  fields=%s", room_scan_id, list(kwargs.keys()))
     result = (
         get_db().table('room_scans')
         .update(kwargs)
         .eq('id', room_scan_id)
         .execute()
     )
+    ok = bool(result.data)
+    logger.info("[db] %s room_scan updated  id=%s", '✓' if ok else '✗ no rows', room_scan_id)
     return result.data[0] if result.data else None
 
 
@@ -205,8 +214,12 @@ def create_estimate(room_scan_id: Optional[str] = None,
         row['room_scan_id'] = room_scan_id
     if project_id:
         row['project_id'] = project_id
+    logger.info("[db] INSERT estimates  room_scan_id=%s  project_id=%s  total=%s",
+                room_scan_id, project_id, row.get('total_estimate'))
     result = get_db().table('estimates').insert(row).execute()
-    return result.data[0]
+    est = result.data[0]
+    logger.info("[db] ✓ estimate created  id=%s", est['id'])
+    return est
 
 
 def get_estimate(estimate_id: str) -> Optional[EstimateRow]:
@@ -252,7 +265,9 @@ def bulk_create_line_items(
         {'estimate_id': estimate_id, 'sort_order': idx, **item}
         for idx, item in enumerate(items)
     ]
+    logger.info("[db] INSERT estimate_line_items  estimate_id=%s  count=%d", estimate_id, len(rows))
     result = get_db().table('estimate_line_items').insert(rows).execute()
+    logger.info("[db] ✓ %d line item(s) created", len(result.data))
     return result.data
 
 
