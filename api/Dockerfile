@@ -26,3 +26,5 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 5001
+
+CMD gunicorn "app:create_app()" --bind 0.0.0.0:${PORT:-5001} --workers 2 --timeout 120
