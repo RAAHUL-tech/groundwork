@@ -27,11 +27,12 @@ def create_app() -> Flask:
     # ── CORS ─────────────────────────────────────────────────────────────────
     # Allow Expo dev server and production app origins
     CORS(app, origins=[
-        'http://localhost:8081',
-        'http://localhost:19006',
-        'exp://localhost:8081',
-        'https://*.supabase.co',
-    ])
+    'http://localhost:8081',
+    'http://localhost:19006',
+    'exp://localhost:8081',
+    'https://*.supabase.co',
+    'https://*.railway.app',       
+])
 
     # ── Rate limiting (Redis-backed) ──────────────────────────────────────────
     limiter.init_app(app)
