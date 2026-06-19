@@ -35,12 +35,22 @@ def _client():
 def build_upload_key(content_type: str, original_filename: str) -> str:
     """
     Return a unique S3 key for an upload.
-    Images  → uploads/images/<uuid>/<filename>
-    Videos  → uploads/videos/<uuid>/<filename>
+    Images → uploads/images/<uuid>/<filename>
+    Audio  → uploads/audio/<uuid>/<filename>
+    Videos → uploads/videos/<uuid>/<filename>
     """
-    media_folder = 'images' if content_type in IMAGE_CONTENT_TYPES else 'videos'
+    if content_type in IMAGE_CONTENT_TYPES:
+        folder = 'images'
+    elif content_type.startswith('audio/'):
+        folder = 'audio'
+    else:
+        folder = 'videos'
     safe_name = original_filename.replace(' ', '_')
-    return f"uploads/{media_folder}/{uuid.uuid4().hex}/{safe_name}"
+    return f"uploads/{folder}/{uuid.uuid4().hex}/{safe_name}"
+
+
+def is_audio(content_type: str) -> bool:
+    return content_type.startswith('audio/')
 
 
 def preprocessed_key(original_key: str) -> str:
@@ -116,6 +126,15 @@ def upload_bytes(s3_key: str, data: bytes, content_type: str = 'image/jpeg') -> 
         ContentType=content_type,
     )
     return s3_key
+
+
+def generate_presigned_get(s3_key: str, expires_in: int = 604800) -> str:
+    """Return a presigned S3 GET URL. Default expiry: 7 days."""
+    return _client().generate_presigned_url(
+        'get_object',
+        Params={'Bucket': Config.S3_BUCKET, 'Key': s3_key},
+        ExpiresIn=expires_in,
+    )
 
 
 def is_image(content_type: str) -> bool:

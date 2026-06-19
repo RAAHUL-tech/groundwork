@@ -10,7 +10,7 @@ from flask import Blueprint, request, jsonify, g
 from app import limiter
 from middleware.auth import optional_auth
 
-from services.s3_storage import build_upload_key, generate_presigned_put, s3_uri, is_image
+from services.s3_storage import build_upload_key, generate_presigned_put, s3_uri, is_image, is_audio
 from models.supabase_models import create_room_scan
 
 upload_bp = Blueprint('upload', __name__)
@@ -56,6 +56,16 @@ def presign():
 
     s3_key     = build_upload_key(content_type, file_name)
     upload_url = generate_presigned_put(s3_key, content_type, PRESIGN_TTL)
+
+    # Audio uploads are not associated with a room_scan — the s3_key is passed
+    # directly to POST /estimate as s3_audio_key and handled by the Celery worker.
+    if is_audio(content_type):
+        return jsonify({
+            'upload_url':   upload_url,
+            's3_key':       s3_key,
+            'room_scan_id': room_scan_id or None,
+            'expires_in':   PRESIGN_TTL,
+        }), 200
 
     if room_scan_id:
         # Multi-image flow: append to existing scan instead of creating orphans

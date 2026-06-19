@@ -1,7 +1,8 @@
-import { ScrollView, StyleSheet, Text, View, Pressable } from 'react-native';
+import { ScrollView, StyleSheet, Text, View, Pressable, Modal, FlatList, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router, useLocalSearchParams } from 'expo-router';
 import Animated, { FadeIn, FadeInDown, FadeInLeft } from 'react-native-reanimated';
+import { useState, useEffect, useCallback } from 'react';
 import { Colors } from '@/constants/colors';
 import {
   SectionLabel,
@@ -12,28 +13,9 @@ import {
   confidenceColor,
   confidenceLabel,
 } from '@/components';
-import { getEstimateResult } from '@/services/estimateStore';
-
-// ─── Mock data ────────────────────────────────────────────────────────────────
-const MOCK_RESULT = {
-  room_type: 'Kitchen',
-  room_confidence: 0.94,
-  condition: 'fair' as const,
-  condition_notes:
-    'Dated cabinets with original hardware, laminate countertops showing wear, tile flooring in fair condition.',
-  scope_observations:
-    'Mid-1990s kitchen likely needing full renovation. Cabinet replacement, countertop upgrade, and flooring update are the primary scope items.',
-  detected_items: [
-    { label: 'Cabinets',          icon: '🗄️',  confidence: 0.91, quantity: 18.5, unit: 'linear ft' },
-    { label: 'Countertops',       icon: '🪨',  confidence: 0.88, quantity: 32,   unit: 'sq ft'    },
-    { label: 'Sink',              icon: '🚰',  confidence: 0.95, quantity: 1,    unit: 'each'     },
-    { label: 'Dishwasher',        icon: '🍽️', confidence: 0.82, quantity: 1,    unit: 'each'     },
-    { label: 'Refrigerator',      icon: '❄️',  confidence: 0.97, quantity: 1,    unit: 'each'     },
-    { label: 'Flooring',          icon: '⬜',  confidence: 0.93, quantity: 210,  unit: 'sq ft'    },
-    { label: 'Windows',           icon: '🪟',  confidence: 0.79, quantity: 2,    unit: 'each'     },
-    { label: 'Lighting Fixtures', icon: '💡',  confidence: 0.86, quantity: 3,    unit: 'each'     },
-  ],
-};
+import { getEstimateResult, getEstimateJobId, setProjectClient } from '@/services/estimateStore';
+import { groundworkApi } from '@/services/api';
+import type { VisionDetectedFeature, Project, ProjectAggregate } from '@/services/api';
 
 // Map API label strings to display icons
 const ITEM_ICONS: Record<string, string> = {
@@ -41,7 +23,8 @@ const ITEM_ICONS: Record<string, string> = {
   sink: '🚰', dishwasher: '🍽️', refrigerator: '❄️', range: '🔥',
   flooring: '⬜', windows: '🪟', window: '🪟',
   lighting: '💡', toilet: '🚽', tub: '🛁', shower: '🚿',
-  vanity: '🪞', door: '🚪', paint: '🎨',
+  vanity: '🪞', door: '🚪', paint: '🎨', backsplash: '🧱',
+  appliance: '⚡', microwave: '📦', hood: '🌬️',
 };
 
 function iconForLabel(label: string): string {
@@ -52,33 +35,41 @@ function iconForLabel(label: string): string {
   return '🔧';
 }
 
-// Normalise API result to the shape the UI expects
-function normaliseResult(raw: ReturnType<typeof getEstimateResult>) {
-  if (!raw) return MOCK_RESULT;
-  return {
-    room_type: raw.room_type.charAt(0).toUpperCase() + raw.room_type.slice(1).replace('_', ' '),
-    room_confidence: raw.room_confidence,
-    condition: (raw.condition ?? 'fair') as 'poor' | 'fair' | 'good' | 'excellent',
-    condition_notes: raw.condition_notes ?? '',
-    scope_observations: raw.scope_narrative ?? '',
-    detected_items: (raw.detected_items ?? []).map((item) => ({
-      label: item.label.charAt(0).toUpperCase() + item.label.slice(1).replace(/_/g, ' '),
-      icon: iconForLabel(item.label),
-      confidence: item.confidence,
-      quantity: item.quantity ?? 0,
-      unit: item.unit ?? '',
-    })),
-  };
-}
-
 type Condition = 'poor' | 'fair' | 'good' | 'excellent';
 
-function conditionColor(c: Condition) {
-  return { poor: Colors.error, fair: Colors.warning, good: Colors.success, excellent: Colors.primary }[c];
+function conditionColor(c: string): string {
+  return (
+    { poor: Colors.error, fair: Colors.warning, good: Colors.success, excellent: Colors.primary }[c as Condition]
+    ?? Colors.textMuted
+  );
 }
 
-function fmtQty(qty: number) {
-  return qty % 1 === 0 ? qty.toString() : qty.toFixed(1);
+function conditionLabel(c: string): string {
+  return c.charAt(0).toUpperCase() + c.slice(1);
+}
+
+function fmtQty(qty: number | null, unit: string | null): string {
+  if (qty == null) return '';
+  const q = qty % 1 === 0 ? qty.toString() : qty.toFixed(1);
+  return unit ? `${q} ${unit.replace('_', ' ')}` : q;
+}
+
+// Normalise API result to UI shape
+function normaliseResult(raw: ReturnType<typeof getEstimateResult>) {
+  if (!raw) return null;
+  return {
+    room_type: raw.room_type.charAt(0).toUpperCase() + raw.room_type.slice(1).replace(/_/g, ' '),
+    room_confidence: raw.room_confidence,
+    condition: raw.condition ?? 'fair',
+    condition_notes: raw.condition_notes ?? '',
+    scope_observations: raw.scope_narrative ?? '',
+    // What Claude Vision actually SAW — used here in the result UI
+    vision_features: (raw.vision_detected_features ?? []).map((f) => ({
+      ...f,
+      icon: iconForLabel(f.item),
+      displayLabel: f.item.charAt(0).toUpperCase() + f.item.slice(1).replace(/_/g, ' '),
+    })),
+  };
 }
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
@@ -102,44 +93,100 @@ function RoomCard({ roomType, confidence }: { roomType: string; confidence: numb
   );
 }
 
-function ConditionRow({ condition, notes }: { condition: Condition; notes: string }) {
+function ConditionRow({ condition, notes }: { condition: string; notes: string }) {
   const color = conditionColor(condition);
   return (
     <Animated.View entering={FadeInDown.delay(200).duration(400)}>
       <Card style={styles.conditionCard}>
         <View style={styles.conditionRow}>
           <SectionLabel>Condition</SectionLabel>
-          <Badge
-            label={condition.charAt(0).toUpperCase() + condition.slice(1)}
-            color={color}
-          />
+          <Badge label={conditionLabel(condition)} color={color} />
         </View>
-        <Text style={styles.conditionNotes}>{notes}</Text>
+        {!!notes && <Text style={styles.conditionNotes}>{notes}</Text>}
       </Card>
     </Animated.View>
   );
 }
 
-function DetectedItem({
-  icon, label, confidence, quantity, unit, index,
-}: (typeof MOCK_RESULT.detected_items)[0] & { index: number }) {
-  const color = confidenceColor(confidence);
+function FeatureRow({
+  icon, displayLabel, condition, estimated_qty, unit, notes, index,
+}: VisionDetectedFeature & { icon: string; displayLabel: string; index: number }) {
+  const condColor = conditionColor(condition);
+  const qtyStr = fmtQty(estimated_qty, unit);
+
   return (
     <Animated.View
-      entering={FadeInLeft.delay(300 + index * 60).duration(350).springify()}
+      entering={FadeInLeft.delay(300 + index * 55).duration(350).springify()}
       style={styles.itemRow}
     >
       <View style={styles.itemIconWrap}>
         <Text style={styles.itemIcon}>{icon}</Text>
       </View>
       <View style={styles.itemMeta}>
-        <Text style={styles.itemLabel}>{label}</Text>
-        <Text style={styles.itemQty}>{fmtQty(quantity)} {unit}</Text>
+        <Text style={styles.itemLabel}>{displayLabel}</Text>
+        {!!qtyStr && <Text style={styles.itemQty}>{qtyStr}</Text>}
+        {!!notes && <Text style={styles.itemNotes}>{notes}</Text>}
       </View>
-      <View style={[styles.itemConfBadge, { backgroundColor: color + '22' }]}>
-        <Text style={[styles.itemConfText, { color }]}>{Math.round(confidence * 100)}%</Text>
+      <View style={[styles.condBadge, { backgroundColor: condColor + '22' }]}>
+        <Text style={[styles.condBadgeText, { color: condColor }]}>
+          {conditionLabel(condition)}
+        </Text>
       </View>
     </Animated.View>
+  );
+}
+
+// ─── Project picker ───────────────────────────────────────────────────────────
+function ProjectPickerModal({
+  visible,
+  projects,
+  onSelect,
+  onClose,
+}: {
+  visible: boolean;
+  projects: Project[];
+  onSelect: (p: Project) => void;
+  onClose: () => void;
+}) {
+  return (
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
+      <SafeAreaView style={pickerStyles.container} edges={['top', 'bottom']}>
+        <View style={pickerStyles.header}>
+          <Text style={pickerStyles.title}>Select a Project</Text>
+          <Pressable onPress={onClose} hitSlop={12}>
+            <Text style={pickerStyles.closeBtn}>✕</Text>
+          </Pressable>
+        </View>
+        {projects.length === 0 ? (
+          <View style={pickerStyles.empty}>
+            <Text style={pickerStyles.emptyText}>No projects found.</Text>
+            <Text style={pickerStyles.emptyHint}>Create a project in the Projects tab first.</Text>
+          </View>
+        ) : (
+          <FlatList
+            data={projects}
+            keyExtractor={(p) => p.id}
+            contentContainerStyle={{ padding: 16, gap: 10 }}
+            renderItem={({ item: p }) => (
+              <Pressable style={pickerStyles.projectRow} onPress={() => onSelect(p)}>
+                <View style={{ flex: 1 }}>
+                  <Text style={pickerStyles.projectName}>{p.name}</Text>
+                  {!!p.client_name && (
+                    <Text style={pickerStyles.projectClient}>{p.client_name}</Text>
+                  )}
+                </View>
+                {p.total_estimate != null && (
+                  <Text style={pickerStyles.projectTotal}>
+                    ${Math.round(p.total_estimate).toLocaleString()}
+                  </Text>
+                )}
+                <Text style={pickerStyles.chevron}>›</Text>
+              </Pressable>
+            )}
+          />
+        )}
+      </SafeAreaView>
+    </Modal>
   );
 }
 
@@ -147,6 +194,57 @@ function DetectedItem({
 export default function ResultScreen() {
   const { captureMode } = useLocalSearchParams<{ captureMode: string }>();
   const result = normaliseResult(getEstimateResult());
+
+  // Project-picker state
+  const [projects, setProjects]             = useState<Project[]>([]);
+  const [pickerVisible, setPickerVisible]   = useState(false);
+  const [linking, setLinking]               = useState(false);
+  const [linked, setLinked]                 = useState<ProjectAggregate | null>(null);
+  const [linkError, setLinkError]           = useState<string | null>(null);
+
+  useEffect(() => {
+    groundworkApi.getProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, []);
+
+  const handleSelectProject = useCallback(async (project: Project) => {
+    setPickerVisible(false);
+    setLinking(true);
+    setLinkError(null);
+    const jobId = getEstimateJobId();
+    if (!jobId) {
+      setLinkError('No estimate job found. Please run an estimate first.');
+      setLinking(false);
+      return;
+    }
+    try {
+      const agg = await groundworkApi.addRoomToProject({
+        project_id: project.id,
+        estimate_job_id: jobId,
+      });
+      setLinked(agg);
+      setProjectClient({
+        name:    agg.client_name    ?? project.client_name    ?? '',
+        address: agg.client_address ?? project.client_address ?? '',
+      });
+    } catch (e: any) {
+      setLinkError(e?.message ?? 'Failed to link to project.');
+    } finally {
+      setLinking(false);
+    }
+  }, []);
+
+  // If no result yet, show a minimal placeholder
+  if (!result) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }}>
+          <Text style={{ color: Colors.textMuted, fontSize: 16 }}>No analysis available.</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -166,37 +264,117 @@ export default function ResultScreen() {
           <View style={{ width: 40 }} />
         </Animated.View>
 
-        {/* Room classification card */}
+        {/* Room classification */}
         <RoomCard roomType={result.room_type} confidence={result.room_confidence} />
 
-        {/* Condition card */}
+        {/* Condition */}
         <ConditionRow condition={result.condition} notes={result.condition_notes} />
 
         {/* Scope observations */}
-        <Animated.View entering={FadeInDown.delay(250).duration(400)}>
-          <Card style={styles.scopeCard}>
-            <SectionLabel>Scope Observations</SectionLabel>
-            <Text style={styles.scopeText}>{result.scope_observations}</Text>
+        {!!result.scope_observations && (
+          <Animated.View entering={FadeInDown.delay(250).duration(400)}>
+            <Card style={styles.scopeCard}>
+              <SectionLabel>Scope Observations</SectionLabel>
+              <Text style={styles.scopeText}>{result.scope_observations}</Text>
+            </Card>
+          </Animated.View>
+        )}
+
+        {/* Detected objects — from Claude Vision 1st call only */}
+        {result.vision_features.length > 0 && (
+          <>
+            <Animated.View
+              entering={FadeInDown.delay(280).duration(400)}
+              style={styles.sectionHeader}
+            >
+              <SectionLabel>Detected Objects</SectionLabel>
+              <View style={styles.countBadge}>
+                <Text style={styles.countBadgeText}>{result.vision_features.length}</Text>
+              </View>
+            </Animated.View>
+
+            <View style={styles.itemsCard}>
+              {result.vision_features.map((feat, i) => (
+                <View key={feat.item}>
+                  <FeatureRow {...feat} index={i} />
+                  {i < result.vision_features.length - 1 && (
+                    <View style={styles.itemDivider} />
+                  )}
+                </View>
+              ))}
+            </View>
+          </>
+        )}
+        {/* Add to Project */}
+        <Animated.View entering={FadeInDown.delay(500).duration(400)}>
+          <Card style={styles.projectCard}>
+            <SectionLabel>Add to Project</SectionLabel>
+
+            {linked ? (
+              /* ── Success state ── */
+              <View style={styles.linkedWrap}>
+                <View style={styles.linkedBadge}>
+                  <Text style={styles.linkedBadgeText}>✓  Added to {linked.name}</Text>
+                </View>
+                <View style={styles.aggregateRow}>
+                  <View style={styles.aggregateStat}>
+                    <Text style={styles.aggregateStatLabel}>Rooms</Text>
+                    <Text style={styles.aggregateStatValue}>{linked.aggregate.room_count}</Text>
+                  </View>
+                  <View style={styles.aggregateDivider} />
+                  <View style={styles.aggregateStat}>
+                    <Text style={styles.aggregateStatLabel}>Project Total</Text>
+                    <Text style={[styles.aggregateStatValue, { color: Colors.primary }]}>
+                      ${linked.aggregate.grand_total.toLocaleString()}
+                    </Text>
+                  </View>
+                  {linked.aggregate.mobilization > 0 && (
+                    <>
+                      <View style={styles.aggregateDivider} />
+                      <View style={styles.aggregateStat}>
+                        <Text style={styles.aggregateStatLabel}>Mobilization</Text>
+                        <Text style={styles.aggregateStatValue}>
+                          +${linked.aggregate.mobilization.toLocaleString()}
+                        </Text>
+                      </View>
+                    </>
+                  )}
+                </View>
+              </View>
+            ) : linking ? (
+              /* ── Loading ── */
+              <View style={styles.linkingWrap}>
+                <ActivityIndicator size="small" color={Colors.primary} />
+                <Text style={styles.linkingText}>Linking to project…</Text>
+              </View>
+            ) : (
+              /* ── Default state ── */
+              <View style={styles.projectPickerWrap}>
+                {!!linkError && (
+                  <Text style={styles.linkError}>{linkError}</Text>
+                )}
+                <Text style={styles.projectHint}>
+                  Associate this scan with an existing project to track multi-room totals.
+                </Text>
+                <Pressable
+                  style={styles.selectProjectBtn}
+                  onPress={() => setPickerVisible(true)}
+                >
+                  <Text style={styles.selectProjectBtnText}>Select Project</Text>
+                </Pressable>
+              </View>
+            )}
           </Card>
         </Animated.View>
-
-        {/* Detected items header */}
-        <Animated.View entering={FadeInDown.delay(280).duration(400)} style={styles.sectionHeader}>
-          <SectionLabel>Detected Objects</SectionLabel>
-          <View style={styles.countBadge}>
-            <Text style={styles.countBadgeText}>{result.detected_items.length}</Text>
-          </View>
-        </Animated.View>
-
-        <View style={styles.itemsCard}>
-          {result.detected_items.map((item, i) => (
-            <View key={item.label}>
-              <DetectedItem {...item} index={i} />
-              {i < result.detected_items.length - 1 && <View style={styles.itemDivider} />}
-            </View>
-          ))}
-        </View>
       </ScrollView>
+
+      {/* Project picker modal */}
+      <ProjectPickerModal
+        visible={pickerVisible}
+        projects={projects}
+        onSelect={handleSelectProject}
+        onClose={() => setPickerVisible(false)}
+      />
 
       {/* Sticky CTA */}
       <Animated.View entering={FadeInDown.delay(600).duration(400)} style={styles.ctaWrap}>
@@ -290,8 +468,9 @@ const styles = StyleSheet.create({
   itemMeta: { flex: 1, gap: 2 },
   itemLabel: { fontSize: 15, fontWeight: '600', color: Colors.text },
   itemQty: { fontSize: 13, color: Colors.textMuted },
-  itemConfBadge: { borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4 },
-  itemConfText: { fontSize: 13, fontWeight: '700' },
+  itemNotes: { fontSize: 12, color: Colors.textMuted, fontStyle: 'italic', marginTop: 2 },
+  condBadge: { borderRadius: 8, paddingHorizontal: 9, paddingVertical: 4 },
+  condBadgeText: { fontSize: 12, fontWeight: '700' },
   itemDivider: { height: 1, backgroundColor: Colors.border, marginLeft: 66 },
 
   // Sticky CTA
@@ -300,4 +479,64 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: Colors.border,
     backgroundColor: Colors.background,
   },
+
+  // Add to Project card
+  projectCard: { gap: 12 },
+  projectPickerWrap: { gap: 10 },
+  projectHint: { fontSize: 13, color: Colors.textMuted, lineHeight: 20 },
+  selectProjectBtn: {
+    backgroundColor: Colors.primary,
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  selectProjectBtnText: { fontSize: 15, fontWeight: '700', color: Colors.white },
+  linkingWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 4 },
+  linkingText: { fontSize: 14, color: Colors.textMuted },
+  linkError: { fontSize: 13, color: Colors.error, lineHeight: 19 },
+
+  // Success aggregate
+  linkedWrap: { gap: 12 },
+  linkedBadge: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.successBg,
+    borderRadius: 10, paddingHorizontal: 12, paddingVertical: 7,
+    alignSelf: 'flex-start',
+  },
+  linkedBadgeText: { fontSize: 13, fontWeight: '700', color: Colors.success },
+  aggregateRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.surfaceRaised,
+    borderRadius: 12, padding: 14, gap: 0,
+  },
+  aggregateStat: { flex: 1, alignItems: 'center', gap: 4 },
+  aggregateStatLabel: { fontSize: 11, color: Colors.textMuted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.4 },
+  aggregateStatValue: { fontSize: 18, fontWeight: '800', color: Colors.text },
+  aggregateDivider: { width: 1, height: 32, backgroundColor: Colors.border },
+});
+
+// ─── Picker modal styles ──────────────────────────────────────────────────────
+const pickerStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.background },
+  header: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 20, paddingVertical: 16,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+  },
+  title: { fontSize: 18, fontWeight: '700', color: Colors.text },
+  closeBtn: { fontSize: 18, color: Colors.textMuted, fontWeight: '600' },
+  empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8, padding: 40 },
+  emptyText: { fontSize: 16, fontWeight: '600', color: Colors.text },
+  emptyHint: { fontSize: 14, color: Colors.textMuted, textAlign: 'center' },
+  projectRow: {
+    flexDirection: 'row', alignItems: 'center',
+    backgroundColor: Colors.surface,
+    borderRadius: 14, padding: 16,
+    borderWidth: 1, borderColor: Colors.border,
+    gap: 8,
+  },
+  projectName: { fontSize: 16, fontWeight: '700', color: Colors.text },
+  projectClient: { fontSize: 13, color: Colors.textMuted, marginTop: 2 },
+  projectTotal: { fontSize: 15, fontWeight: '700', color: Colors.primary },
+  chevron: { fontSize: 22, color: Colors.textMuted },
 });

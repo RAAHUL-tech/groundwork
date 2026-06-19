@@ -19,7 +19,6 @@ import {
 } from 'expo-audio';
 import { Colors } from '@/constants/colors';
 import { uploadCameraPhoto } from '@/services/upload';
-import { groundworkApi } from '@/services/api';
 
 type CaptureMode = 'photo' | 'video';
 
@@ -43,8 +42,7 @@ export default function CameraScreen() {
 
   // expo-audio recorder — hook manages its own lifecycle
   const [audioTimer, setAudioTimer] = useState(0);
-  const [isTranscribing, setIsTranscribing] = useState(false);
-  const [audioTranscript, setAudioTranscript] = useState<string | null>(null);
+  const [audioUri, setAudioUri] = useState<string | null>(null);
 
   const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
   // RecordingStatus (statusListener arg) has no isRecording field — use useAudioRecorderState instead
@@ -86,24 +84,10 @@ export default function CameraScreen() {
 
   const handleAudioToggle = useCallback(async () => {
     if (recorderState.isRecording) {
-      // Stop → upload → transcribe
+      // Stop → store URI locally; worker handles transcription after S3 upload
       await audioRecorder.stop();
       const uri = audioRecorder.uri;
-      if (!uri) return;
-
-      setIsTranscribing(true);
-      try {
-        const text = await groundworkApi.transcribeAudio(uri);
-        setAudioTranscript(text || null);
-        if (!text) Alert.alert('No Speech Detected', 'Try speaking closer to the microphone.');
-      } catch (err: any) {
-        Alert.alert(
-          'Transcription Failed',
-          err?.message ?? 'Could not reach the backend.',
-        );
-      } finally {
-        setIsTranscribing(false);
-      }
+      setAudioUri(uri || null);
     } else {
       // Start recording
       const { granted } = await requestRecordingPermissionsAsync();
@@ -115,7 +99,7 @@ export default function CameraScreen() {
       await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
       await audioRecorder.prepareToRecordAsync();
       audioRecorder.record();
-      setAudioTranscript(null); // clear previous on new recording
+      setAudioUri(null); // clear previous on new recording
     }
   }, [recorderState.isRecording, audioRecorder]);
 
@@ -138,7 +122,7 @@ export default function CameraScreen() {
         setUploading(true);
         setUploadStatus('Uploading photo…');
         const { jobId } = await uploadCameraPhoto(photo.uri, 'image/jpeg', {
-          voiceTranscript: audioTranscript ?? undefined,
+          audioUri: audioUri ?? undefined,
         });
         setUploadStatus('Starting analysis…');
         router.push({ pathname: '/scanning' as any, params: { captureMode: 'photo', jobId } });
@@ -194,7 +178,7 @@ export default function CameraScreen() {
         setUploadStatus('');
       }
     }
-  }, [cameraReady, cameraRef, mode, isRecordingVideo, uploading, audioTranscript, micPermission]);
+  }, [cameraReady, cameraRef, mode, isRecordingVideo, uploading, audioUri, micPermission]);
 
   // ── Permission gates ────────────────────────────────────────────────────────
 
@@ -222,7 +206,7 @@ export default function CameraScreen() {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  const audioButtonBusy = isTranscribing || uploading;
+  const audioButtonBusy = uploading;
 
   return (
     <View style={styles.container}>
@@ -264,17 +248,6 @@ export default function CameraScreen() {
         </Pressable>
       </SafeAreaView>
 
-      {/* Transcript banner — shown once voice note is transcribed */}
-      {audioTranscript && !recorderState.isRecording && !isTranscribing && (
-        <View style={styles.transcriptBanner}>
-          <Text style={styles.transcriptIcon}>🎙️</Text>
-          <Text style={styles.transcriptText} numberOfLines={2}>{audioTranscript}</Text>
-          <Pressable onPress={() => setAudioTranscript(null)} hitSlop={8}>
-            <Text style={styles.transcriptClear}>✕</Text>
-          </Pressable>
-        </View>
-      )}
-
       {/* Bottom controls */}
       <SafeAreaView style={styles.bottomOverlay} edges={['bottom']}>
         <View style={styles.modeRow}>
@@ -294,10 +267,10 @@ export default function CameraScreen() {
         {mode === 'video' && !isRecordingVideo && (
           <Text style={styles.hint}>15–30 sec walkthrough · speak while recording</Text>
         )}
-        {mode === 'photo' && !isRecordingVideo && !recorderState.isRecording && !audioTranscript && (
+        {mode === 'photo' && !isRecordingVideo && !recorderState.isRecording && !audioUri && (
           <Text style={styles.hint}>Record a voice note first, then capture the room</Text>
         )}
-        {mode === 'photo' && !!audioTranscript && (
+        {mode === 'photo' && !!audioUri && !recorderState.isRecording && (
           <Text style={styles.hintGreen}>Voice note ready · now capture the room</Text>
         )}
 
@@ -307,26 +280,16 @@ export default function CameraScreen() {
             style={[
               styles.sideBtn,
               recorderState.isRecording && styles.sideBtnRecording,
-              !!audioTranscript && !recorderState.isRecording && styles.sideBtnDone,
+              !!audioUri && !recorderState.isRecording && styles.sideBtnDone,
             ]}
             onPress={handleAudioToggle}
             disabled={audioButtonBusy || isRecordingVideo}
           >
-            {isTranscribing ? (
-              <ActivityIndicator size="small" color={Colors.white} style={{ height: 26 }} />
-            ) : (
-              <Text style={styles.sideBtnIcon}>
-                {recorderState.isRecording ? '⏹️' : audioTranscript ? '✅' : '🎙️'}
-              </Text>
-            )}
+            <Text style={styles.sideBtnIcon}>
+              {recorderState.isRecording ? '⏹️' : audioUri ? '✅' : '🎙️'}
+            </Text>
             <Text style={styles.sideBtnLabel}>
-              {isTranscribing
-                ? 'Transcribing…'
-                : recorderState.isRecording
-                  ? 'Stop'
-                  : audioTranscript
-                    ? 'Re-record'
-                    : 'Voice'}
+              {recorderState.isRecording ? 'Stop' : audioUri ? 'Re-record' : 'Voice'}
             </Text>
           </Pressable>
 
@@ -420,17 +383,6 @@ const styles = StyleSheet.create({
   recDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.primary },
   recDotRed: { backgroundColor: Colors.error },
   recTimer: { fontSize: 15, fontWeight: '700', color: Colors.white, fontVariant: ['tabular-nums'] },
-
-  transcriptBanner: {
-    position: 'absolute', left: 16, right: 16, bottom: 220,
-    flexDirection: 'row', alignItems: 'center', gap: 10,
-    backgroundColor: 'rgba(0,0,0,0.82)', borderRadius: 14,
-    paddingHorizontal: 14, paddingVertical: 10,
-    borderWidth: 1, borderColor: Colors.primary + '66', zIndex: 10,
-  },
-  transcriptIcon: { fontSize: 18 },
-  transcriptText: { flex: 1, fontSize: 13, color: Colors.white, lineHeight: 18 },
-  transcriptClear: { fontSize: 14, color: 'rgba(255,255,255,0.5)', fontWeight: '700' },
 
   bottomOverlay: {
     position: 'absolute', bottom: 0, left: 0, right: 0,

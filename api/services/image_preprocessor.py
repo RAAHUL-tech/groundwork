@@ -15,7 +15,11 @@ import io
 import logging
 from typing import Optional
 
+import pillow_heif
 from PIL import Image, ImageOps
+
+# Register HEIC/HEIF opener so Pillow can decode iPhone photos
+pillow_heif.register_heif_opener()
 
 logger = logging.getLogger(__name__)
 

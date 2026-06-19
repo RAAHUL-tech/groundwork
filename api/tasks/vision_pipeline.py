@@ -4,6 +4,7 @@ from typing import Optional
 
 from celery_worker import celery_app
 from logging_config import configure_logging
+from services.pricing_engine import get_regional_multiplier
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -147,6 +148,11 @@ def _persist_result(
         if line_items:
             bulk_create_line_items(estimate['id'], line_items)
 
+        # Write DB IDs back into result so proposal + rooms tasks can find them via Redis
+        result['_estimate_db_id'] = estimate['id']
+        result['_project_id']     = project_id
+        result['_room_scan_id']   = room_scan_id
+
         if room_scan_id:
             scan_updates: dict = {
                 'status': 'complete',
@@ -212,6 +218,7 @@ def run_vision_pipeline(  # noqa: C901
     project_id: Optional[str] = None,
     s3_image_keys: Optional[list] = None,
     s3_video_key: Optional[str] = None,
+    s3_audio_key: Optional[str] = None,
     room_scan_id: Optional[str] = None,
     user_id: Optional[str] = None,
     ar_measurements: Optional[dict] = None,
@@ -238,12 +245,13 @@ def run_vision_pipeline(  # noqa: C901
     logger.info("  zip_code      : %s", zip_code)
     logger.info("  project_id    : %s", project_id)
     logger.info("  room_scan_id  : %s", room_scan_id)
+    logger.info("  s3_audio_key  : %s", s3_audio_key)
     logger.info("  ar_measurements: %s", "yes" if ar_measurements else "no")
     logger.info("=" * 60)
 
     try:
         return _run(
-            self, job_id, images, s3_image_keys, s3_video_key,
+            self, job_id, images, s3_image_keys, s3_video_key, s3_audio_key,
             voice_transcript, room_hints, tier, zip_code,
             project_id, room_scan_id, ar_measurements,
         )
@@ -253,7 +261,7 @@ def run_vision_pipeline(  # noqa: C901
 
 
 def _run(
-    self, job_id, images, s3_image_keys, s3_video_key,
+    self, job_id, images, s3_image_keys, s3_video_key, s3_audio_key,
     voice_transcript, room_hints, tier, zip_code, project_id, room_scan_id,
     ar_measurements=None,
 ):
@@ -291,7 +299,7 @@ def _run(
             _done(s, ok=False, detail=str(exc))
             logger.error("[vision_pipeline] Video frame extraction failed: %s", exc)
 
-        # Transcribe the video's audio track if no manual voice note was provided
+        # Transcribe the video's embedded audio track if no voice note was provided
         if not voice_transcript:
             s = _step("video audio transcription (Whisper)")
             try:
@@ -303,6 +311,20 @@ def _run(
             except Exception as exc:
                 _done(s, ok=False, detail=str(exc))
                 logger.warning("[vision_pipeline] video audio transcription failed: %s", exc)
+
+    # ── S3 audio transcription (photo + mic flow) ─────────────────────────────
+    if s3_audio_key and not voice_transcript:
+        s = _step(f"audio transcription (s3 audio key)")
+        try:
+            from services.s3_storage import download_bytes
+            from services.whisper_transcribe import transcribe
+            audio_bytes = download_bytes(s3_audio_key)
+            ext = s3_audio_key.rsplit('.', 1)[-1].lower() if '.' in s3_audio_key else 'm4a'
+            voice_transcript = transcribe(audio_bytes, file_ext=ext) or None
+            _done(s, ok=True, detail=f"transcript ({len(voice_transcript or '')} chars): {(voice_transcript or '')[:80]!r}")
+        except Exception as exc:
+            _done(s, ok=False, detail=str(exc))
+            logger.warning("[vision_pipeline] S3 audio transcription failed: %s", exc)
 
     logger.info("[vision_pipeline] total images for AI analysis: %d", len(images))
     input_source = "video" if s3_video_key else ("s3" if s3_image_keys else "base64")
@@ -338,36 +360,39 @@ def _run(
     room_confidence = float(classification.get('confidence', 0.5))
     condition       = classification.get('condition', 'fair')
 
-    # ── Step 1.5: Extract structured scope items from voice transcript ────────
-    voice_scope_items: list[dict] = []
-    voice_detections: list[dict] = []
-    if voice_transcript:
-        s = _step("Step 1.5 — Voice scope extraction (Claude)")
-        logger.info("[vision_pipeline] %s ...", s['name'])
-        try:
-            from services.claude_vision import extract_voice_scope
-            voice_scope_items = extract_voice_scope(voice_transcript, room_type)
-            for vi in voice_scope_items:
-                label = vi.get('item', '').strip()
-                if not label:
-                    continue
-                voice_detections.append({
-                    'label':      label,
-                    'confidence': 0.90,
-                    'quantity':   vi.get('qty'),
-                    'unit':       vi.get('unit'),
-                    'is_room_hint': False,
-                    'source':     'voice',
-                })
-            _done(s, ok=True, detail=(
-                f"{len(voice_scope_items)} item(s): "
-                f"{[v.get('item') for v in voice_scope_items]}"
-            ))
-        except Exception as exc:
-            _done(s, ok=False, detail=str(exc))
-            logger.warning("[vision_pipeline] voice scope extraction failed: %s", exc)
+    # ── Step 1.5: 2nd Claude call — work items list ───────────────────────────
+    # Synthesizes Step 1 visual analysis + voice intent → definitive items to price.
+    # This is what gets purchased at HD. Different from detected_features (what was seen).
+    s = _step("Step 1.5 — Work item extraction (Claude 2nd call)")
+    logger.info("[vision_pipeline] %s ...", s['name'])
+    work_items: list[dict] = []
+    try:
+        from services.claude_vision import generate_work_items
+        work_items = generate_work_items(classification, voice_transcript, room_type)
+        _done(s, ok=True, detail=(
+            f"{len(work_items)} item(s): {[w.get('item') for w in work_items]}"
+        ))
+    except Exception as exc:
+        _done(s, ok=False, detail=str(exc))
+        logger.warning("[vision_pipeline] work item extraction failed: %s", exc)
 
-    # ── Step 2: Local YOLOv8s — object detection (COCO pretrained) ──────────
+    # Convert work_items (Claude 2nd call) to detection format for quantity estimator
+    claude_detections: list[dict] = []
+    for wi in work_items:
+        label = wi.get('item', '').strip()
+        if not label:
+            continue
+        claude_detections.append({
+            'label':        label,
+            'confidence':   0.92,
+            'quantity':     wi.get('qty'),
+            'unit':         wi.get('unit'),
+            'is_room_hint': False,
+            'source':       'claude_analysis',
+            'action':       wi.get('action', 'replace'),
+        })
+
+    # ── Step 2: Local YOLOv8s — bounding boxes for depth scale + segmentation ─
     s = _step("Step 2 — YOLOv8s local detection")
     logger.info("[vision_pipeline] %s ...", s['name'])
     yolo_detections: list[dict] = []
@@ -390,7 +415,6 @@ def _run(
     depth_measurements: dict = {}
     try:
         from services.depth_estimator import compute_measurements
-        # Use the first available image for depth (best single-frame result)
         first_image = images[0] if images else None
         if first_image:
             depth_measurements = compute_measurements(first_image, yolo_detections)
@@ -407,13 +431,19 @@ def _run(
         logger.warning("[vision_pipeline] Depth estimation failed: %s", exc)
 
     # ── Step 4: Quantity estimation ───────────────────────────────────────────
-    # Merge YOLO + voice detections; voice items for labels not already in YOLO
-    existing_yolo_labels = {d['label'] for d in yolo_detections if not d.get('is_room_hint')}
-    merged_detections = yolo_detections + [
-        v for v in voice_detections if v['label'] not in existing_yolo_labels
+    # Claude 2nd-call detections are primary.
+    # YOLO adds bounding-box-detected items that Claude missed (rare, safety net).
+    existing_claude_labels = {d['label'] for d in claude_detections}
+    yolo_supplement = [
+        d for d in yolo_detections
+        if not d.get('is_room_hint') and d['label'] not in existing_claude_labels
     ]
+    merged_detections = claude_detections + yolo_supplement
+    if yolo_supplement:
+        logger.info("[vision_pipeline] YOLO supplemented %d extra item(s): %s",
+                    len(yolo_supplement), [d['label'] for d in yolo_supplement])
 
-    s = _step("Step 4 — Quantity estimation (YOLO + voice + depth + Claude)")
+    s = _step("Step 4 — Quantity estimation (Claude primary + depth + AR)")
     logger.info("[vision_pipeline] %s ...", s['name'])
     detected_items: list[dict] = []
     try:
@@ -426,7 +456,6 @@ def _run(
             depth_measurements=depth_measurements or None,
             condition=condition,
         )
-        # Filter items that don't belong in this room type
         detected_items = _filter_by_room(detected_items, room_type)
         _done(s, ok=True, detail=f"{len(detected_items)} item(s) with quantities")
         for it in detected_items:
@@ -445,31 +474,32 @@ def _run(
         or f"{room_type.replace('_', ' ').title()} remodel based on vision analysis."
     )
 
-    # ── Step 5: Cost engine from detected quantities ──────────────────────────
-    s = _step("Step 5 — Pricing engine")
+    # ── Step 5: Cost engine — all 3 tiers in one price fetch ─────────────────
+    s = _step("Step 5 — Pricing engine (all tiers)")
     logger.info("[vision_pipeline] %s ...", s['name'])
+    tier_results: dict = {}
+    pricing: dict = {}
     try:
-        from services.pricing_engine import calculate_estimate
-        pricing = calculate_estimate(
-            detected_items, room_type, tier, zip_code, scope_narrative,
-        )
+        from services.pricing_engine import calculate_all_tiers
+        tier_results = calculate_all_tiers(detected_items, room_type, zip_code, scope_narrative)
+        # Map requested tier ('standard' / 'eco' / 'premium') to the right key
+        tier_key = tier if tier in tier_results else 'standard'
+        pricing   = tier_results[tier_key]
+        pricing['regional_multiplier'] = pricing.get('regional_multiplier') or 1.0
         _done(s, ok=True, detail=f"total=${pricing['total_estimate']:,}  lines={len(pricing['estimate_breakdown'])}")
     except Exception as exc:
         _done(s, ok=False, detail=str(exc))
         logger.error("[vision_pipeline] pricing failed: %s", exc)
-        pricing = {
-            'estimate_breakdown': [],
-            '_breakdown_meta': [],
-            'subtotal_materials': 0,
-            'subtotal_labor': 0,
-            'permits': 0,
-            'contingency': 0,
-            'total_estimate': 0,
+        _empty = {
+            'estimate_breakdown': [], '_breakdown_meta': [],
+            'subtotal_materials': 0, 'subtotal_labor': 0,
+            'permits': 0, 'contingency': 0, 'total_estimate': 0,
             'estimate_range': {'low': 0, 'high': 0},
-            'regional_multiplier': 1.0,
-            'scope_narrative': scope_narrative,
-            'timeline_estimate_weeks': 4,
+            'regional_multiplier': 1.0, 'scope_narrative': scope_narrative,
+            'timeline_estimate_weeks': 4, 'live_pricing_items': 0,
         }
+        pricing = _empty
+        tier_results = {'eco': _empty, 'standard': _empty, 'premium': _empty}
 
     yolo_construction_count = len([d for d in yolo_detections if not d.get('is_room_hint')])
     depth_available = bool(depth_measurements.get('depth_map_available'))
@@ -481,32 +511,55 @@ def _run(
         voice_transcript, quantity_method, depth_available,
     )
 
+    regional_multiplier = get_regional_multiplier(zip_code)
+
+    def _tier_summary(t: dict) -> dict:
+        return {
+            "total":              t.get("total_estimate", 0),
+            "range":              t.get("estimate_range", {"low": 0, "high": 0}),
+            "subtotal_materials": t.get("subtotal_materials", 0),
+            "subtotal_labor":     t.get("subtotal_labor", 0),
+            "permits":            t.get("permits", 0),
+            "contingency":        t.get("contingency", 0),
+            "breakdown":          t.get("estimate_breakdown", []),
+            "timeline_weeks":     t.get("timeline_estimate_weeks", 4),
+        }
+
     result = {
         "room_type":       room_type,
         "room_confidence": room_confidence,
         "condition":       classification.get('condition', 'fair'),
         "condition_notes": classification.get('condition_notes', ''),
+        # What Claude Vision actually SAW in the image (1st call output).
+        # Used in the result UI to show detected objects.
+        "vision_detected_features": classification.get('detected_features', []),
+        # What the pipeline will price (2nd call + depth + voice synthesis).
         "detected_items":  detected_items,
-        "voice_scope_items": [
-            {**vi, "source": "voice"}
-            for vi in voice_scope_items
-        ],
+        # Work items from the 2nd Claude call (shopping list for HD).
+        "work_items": work_items,
+        # Primary tier (what was requested)
         "estimate_breakdown": pricing['estimate_breakdown'],
-        "_breakdown_meta": pricing.get('_breakdown_meta', []),
+        "_breakdown_meta":    pricing.get('_breakdown_meta', []),
         "subtotal_materials": pricing['subtotal_materials'],
-        "subtotal_labor": pricing['subtotal_labor'],
-        "permits": pricing['permits'],
-        "contingency": pricing['contingency'],
-        "total_estimate": pricing['total_estimate'],
-        "estimate_range": pricing['estimate_range'],
-        "confidence": confidence,
-        "tier": tier,
-        "regional_multiplier": pricing['regional_multiplier'],
-        "scope_narrative": pricing.get('scope_narrative', scope_narrative),
+        "subtotal_labor":     pricing['subtotal_labor'],
+        "permits":            pricing['permits'],
+        "contingency":        pricing['contingency'],
+        "total_estimate":     pricing['total_estimate'],
+        "estimate_range":     pricing['estimate_range'],
+        # All 3 tiers for the mobile estimate screen
+        "tier_estimates": {
+            "economy":  _tier_summary(tier_results.get('eco', pricing)),
+            "standard": _tier_summary(tier_results.get('standard', pricing)),
+            "premium":  _tier_summary(tier_results.get('premium', pricing)),
+        },
+        "confidence":             confidence,
+        "tier":                   tier,
+        "regional_multiplier":    regional_multiplier,
+        "scope_narrative":        pricing.get('scope_narrative', scope_narrative),
         "timeline_estimate_weeks": pricing.get('timeline_estimate_weeks', 4),
-        "zip_code": zip_code,
-        "images_processed": len(images),
-        "input_source": input_source,
+        "zip_code":               zip_code,
+        "images_processed":       len(images),
+        "input_source":           input_source,
     }
 
     # ── Persist to Supabase ───────────────────────────────────────────────────

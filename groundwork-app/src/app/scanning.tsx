@@ -16,7 +16,7 @@ import Animated, {
 import { Colors } from '@/constants/colors';
 import { LogoMark } from '@/components';
 import { groundworkApi } from '@/services/api';
-import { setEstimateResult } from '@/services/estimateStore';
+import { setEstimateResult, setEstimateJobId } from '@/services/estimateStore';
 
 type StepStatus = 'pending' | 'active' | 'done';
 
@@ -28,14 +28,20 @@ interface Step {
 }
 
 const STEPS: Step[] = [
-  { id: 1, label: 'Classifying room type',        detail: 'Reading scene with Claude Vision',    durationMs: 1400 },
-  { id: 2, label: 'Detecting objects & surfaces',  detail: 'Running YOLOv8 object detection',     durationMs: 1600 },
-  { id: 3, label: 'Estimating quantities',         detail: 'Measuring linear ft & sq ft',         durationMs: 1200 },
-  { id: 4, label: 'Pulling live pricing',          detail: 'Fetching Home Depot material costs',  durationMs: 1000 },
-  { id: 5, label: 'Generating estimate',           detail: 'Applying labor rates & markup',       durationMs: 900 },
+  { id: 1, label: 'Classifying room type',        detail: 'Reading scene with Claude Vision',    durationMs: 4000 },
+  { id: 2, label: 'Detecting objects & surfaces',  detail: 'Running YOLOv8 object detection',     durationMs: 5000 },
+  { id: 3, label: 'Estimating quantities',         detail: 'Measuring linear ft & sq ft',         durationMs: 4000 },
+  { id: 4, label: 'Pulling live pricing',          detail: 'Fetching Home Depot material costs',  durationMs: 6000 },
+  { id: 5, label: 'Generating estimate',           detail: 'Applying labor rates & markup',       durationMs: 5000 },
 ];
 
+// Total time for cosmetic step cycling (~24s). Kept separate from progress bar timing.
 const TOTAL_MS = STEPS.reduce((sum, s) => sum + s.durationMs, 0);
+
+// Asymptotic progress: approaches 95% but slows naturally — never hard-freezes.
+// Formula: 0.95 * (1 - e^(-t / TIME_CONSTANT))
+// At 10s ≈ 42%, 20s ≈ 65%, 35s ≈ 80%, 60s ≈ 91%
+const PROGRESS_TIME_CONSTANT = 25_000;
 
 function PulsingRing({ delay = 0, size = 160, color = Colors.primary }: { delay?: number; size?: number; color?: string }) {
   const scale = useSharedValue(1);
@@ -163,7 +169,11 @@ export default function ScanningScreen() {
     frameRef.current = setInterval(() => {
       elapsed.current = Date.now() - startTime;
       // Cap at 95% — final 5% reserved for when polling confirms complete
-      const rawPct = Math.min(elapsed.current / TOTAL_MS, jobId ? 0.95 : 1);
+      // Asymptotic when backed by a real job — slows naturally, never hard-freezes at 95%.
+      // Linear when in mock/no-job mode so it finishes cleanly.
+      const rawPct = jobId
+        ? 0.95 * (1 - Math.exp(-elapsed.current / PROGRESS_TIME_CONSTANT))
+        : Math.min(elapsed.current / TOTAL_MS, 1);
       setProgress(rawPct);
       progressAnim.value = withTiming(rawPct, { duration: 80 });
 
@@ -198,6 +208,7 @@ export default function ScanningScreen() {
 
         if (res.status === 'complete' && res.result) {
           setEstimateResult(res.result);
+          setEstimateJobId(jobId);
           if (!navigatedRef.current) {
             navigatedRef.current = true;
             // Snap progress to 100% visually

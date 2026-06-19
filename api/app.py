@@ -41,13 +41,11 @@ def create_app() -> Flask:
     from routes.proposal import proposal_bp
     from routes.rooms import rooms_bp
     from routes.upload import upload_bp
-    from routes.transcribe import transcribe_bp
 
     app.register_blueprint(estimate_bp)
     app.register_blueprint(proposal_bp)
     app.register_blueprint(rooms_bp)
     app.register_blueprint(upload_bp)
-    app.register_blueprint(transcribe_bp)
 
     # ── Request / response logging ────────────────────────────────────────────
     @app.before_request

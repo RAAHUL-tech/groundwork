@@ -125,6 +125,17 @@ def get_project(project_id: str) -> Optional[ProjectRow]:
     return result.data
 
 
+def list_projects_all() -> list[dict]:
+    """Return all projects ordered by most-recent first (no auth filter — Phase 1)."""
+    result = (
+        get_db().table('projects')
+        .select('id, name, client_name, client_address, status, total_estimate, created_at')
+        .order('created_at', desc=True)
+        .execute()
+    )
+    return result.data or []
+
+
 def list_projects(user_id: str) -> list[ProjectRow]:
     result = (
         get_db().table('projects')
@@ -256,6 +267,31 @@ def list_estimates_by_project(project_id: str) -> list[EstimateRow]:
     return result.data
 
 
+def list_recent_estimates(limit: int = 20) -> list[dict]:
+    """
+    Return the most recent estimates joined with their room_scan metadata.
+    Includes raw_response for client-side estimate restoration, and
+    celery_job_id so the mobile can generate proposals from the history.
+    """
+    result = (
+        get_db().table('estimates')
+        .select(
+            'id, room_scan_id, tier, total_estimate, estimate_low, estimate_high, '
+            'confidence_score, confidence_label, scope_narrative, timeline_weeks, '
+            'created_at, raw_response, '
+            'room_scans(room_type, room_confidence, condition, room_label, celery_job_id)'
+        )
+        .order('created_at', desc=True)
+        .limit(limit)
+        .execute()
+    )
+    rows = []
+    for row in (result.data or []):
+        scan = row.pop('room_scans', None) or {}
+        rows.append({**row, **scan})
+    return rows
+
+
 # ─── ESTIMATE LINE ITEMS ──────────────────────────────────────────────────────
 
 def bulk_create_line_items(
@@ -282,9 +318,96 @@ def get_line_items(estimate_id: str) -> list[EstimateLineItemRow]:
     return result.data
 
 
-def delete_line_items(estimate_id: str) -> bool:
-    get_db().table('estimate_line_items').delete().eq('estimate_id', estimate_id).execute()
-    return True
+# ─── PROJECT ROOMS (multi-room aggregation) ───────────────────────────────────
+
+MOBILIZATION_COST = 500  # flat shared cost when a project has 2+ rooms
+
+
+def add_room_to_project(
+    project_id: str,
+    room_scan_id: Optional[str],
+    estimate_id: Optional[str],
+    room_label: str,
+    total_estimate: float,
+) -> dict:
+    """
+    Link a completed room scan to a project in project_rooms.
+    Upserts (project_id, room_scan_id) — safe to call multiple times.
+    Recalculates and persists the project-level total_estimate.
+    Returns the updated project aggregate dict.
+    """
+    row: dict = {
+        'project_id':    project_id,
+        'room_label':    room_label,
+        'total_estimate': total_estimate,
+    }
+    if room_scan_id:
+        row['room_scan_id'] = room_scan_id
+    if estimate_id:
+        row['estimate_id'] = estimate_id
+
+    logger.info("[db] INSERT project_rooms  project=%s  label=%s  total=%.0f",
+                project_id, room_label, total_estimate)
+    get_db().table('project_rooms').upsert(
+        row,
+        on_conflict='project_id,room_scan_id' if room_scan_id else 'project_id,room_label',
+    ).execute()
+
+    return get_project_aggregate(project_id)
+
+
+def list_project_rooms(project_id: str) -> list[dict]:
+    result = (
+        get_db().table('project_rooms')
+        .select('id, room_label, total_estimate, room_scan_id, estimate_id, added_at')
+        .eq('project_id', project_id)
+        .order('added_at', desc=False)
+        .execute()
+    )
+    return result.data or []
+
+
+def get_project_aggregate(project_id: str) -> Optional[dict]:
+    """
+    Returns the project plus an aggregated cost summary across all its rooms.
+    Applies a flat mobilization cost when the project has 2+ rooms.
+    Persists the updated total_estimate back to the projects table.
+    """
+    project = get_project(project_id)
+    if not project:
+        return None
+
+    rooms = list_project_rooms(project_id)
+    subtotal = sum((r.get('total_estimate') or 0) for r in rooms)
+    mobilization = MOBILIZATION_COST if len(rooms) > 1 else 0
+    grand_total = subtotal + mobilization
+
+    # Keep projects.total_estimate in sync
+    try:
+        get_db().table('projects').update(
+            {'total_estimate': grand_total}
+        ).eq('id', project_id).execute()
+    except Exception as exc:
+        logger.warning("[db] could not update project total: %s", exc)
+
+    logger.info("[db] aggregate project=%s  rooms=%d  subtotal=%d  total=%d",
+                project_id, len(rooms), subtotal, grand_total)
+
+    return {
+        'id':            project_id,
+        'name':          project.get('name'),
+        'client_name':   project.get('client_name'),
+        'client_address':project.get('client_address'),
+        'status':        project.get('status'),
+        'created_at':    project.get('created_at'),
+        'rooms':         rooms,
+        'aggregate': {
+            'room_count':    len(rooms),
+            'subtotal':      round(subtotal),
+            'mobilization':  mobilization,
+            'grand_total':   round(grand_total),
+        },
+    }
 
 
 # ─── PROPOSALS ────────────────────────────────────────────────────────────────

@@ -1,13 +1,11 @@
-version: '3.9'
-
 services:
   api:
-    build: ./api
+    build: .
     container_name: groundwork_api
     ports:
       - "5001:5001"
     volumes:
-      - ./api:/app
+      - .:/app
     env_file:
       - .env
     depends_on:
@@ -21,10 +19,10 @@ services:
     restart: unless-stopped
 
   worker:
-    build: ./api
+    build: .
     container_name: groundwork_worker
     volumes:
-      - ./api:/app
+      - .:/app
     env_file:
       - .env
     depends_on:

@@ -1,52 +1,63 @@
-import { ScrollView, StyleSheet, Text, View, Pressable, Share, Linking, Alert } from 'react-native';
+import { useState } from 'react';
+import { ScrollView, StyleSheet, Text, View, Pressable, Share, Linking, Alert, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import Animated, { FadeIn, FadeInDown, FadeInUp } from 'react-native-reanimated';
 import { Colors } from '@/constants/colors';
 import { ScreenHeader, SectionLabel, LogoMark } from '@/components';
+import { getEstimateResult, getEstimateJobId, getProjectClient } from '@/services/estimateStore';
+import { groundworkApi } from '@/services/api';
 
-// ─── Mock proposal data ───────────────────────────────────────────────────────
+// ─── Demo contractor info (Phase 2: comes from user profile) ─────────────────
 const CONTRACTOR = {
-  name: 'Mike Torres',
+  name:    'Mike Torres',
   company: 'Torres Construction LLC',
   license: 'CA-GC-889234',
-  phone: '714-555-0192',
-  email: 'mike@torresconstruction.com',
+  phone:   '714-555-0192',
+  email:   'mike@torresconstruction.com',
 };
 
-const CLIENT = {
-  name: 'Sarah Johnson',
-  address: '123 Oak St, Fullerton CA 92831',
-  phone: '714-555-0844',
-  email: 'sarah.johnson@email.com',
+const FALLBACK_CLIENT = {
+  name:    'Homeowner',
+  address: '',
+  phone:   '',
+  email:   '',
 };
 
-const PROJECT = {
-  title: 'Kitchen Remodel',
-  date: 'June 15, 2026',
-  validDays: 30,
-  paymentTerms: '50% deposit due at signing, 50% on completion',
-  timeline: '~4 weeks',
-  proposalId: 'GW-2026-0047',
-};
+const PAYMENT_TERMS = '50% deposit due at signing, 50% on completion';
+const VALID_DAYS    = 30;
 
-const LINE_ITEMS = [
-  { label: 'Cabinet replacement',   total: 4532 },
-  { label: 'Quartz countertops',    total: 3520 },
-  { label: 'LVP flooring',          total: 1785 },
-  { label: 'Sink + faucet',         total: 670  },
-  { label: 'Interior painting',     total: 1440 },
-];
+function fmt(n: number) { return '$' + Math.round(n).toLocaleString(); }
 
-const SUMMARY = {
-  materials: 8160, labor: 4865, permits: 1220, contingency: 1425,
-  total: 15670, low: 13320, high: 18804,
-};
-
-function fmt(n: number) { return '$' + n.toLocaleString(); }
+function fmtDate(offsetDays = 0) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+}
 
 // ─── Document preview ─────────────────────────────────────────────────────────
-function ProposalDocument() {
+function ProposalDocument({
+  estimate,
+  propId,
+  client,
+}: {
+  estimate: NonNullable<ReturnType<typeof getEstimateResult>>;
+  propId: string;
+  client: typeof FALLBACK_CLIENT;
+}) {
+  const lineItems = estimate.estimate_breakdown ?? [];
+  const roomLabel = estimate.room_type.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+
+  const summary = {
+    materials:   estimate.subtotal_materials ?? 0,
+    labor:       estimate.subtotal_labor ?? 0,
+    permits:     estimate.permits ?? 0,
+    contingency: estimate.contingency ?? 0,
+    total:       estimate.total_estimate ?? 0,
+    low:         estimate.estimate_range?.low ?? 0,
+    high:        estimate.estimate_range?.high ?? 0,
+  };
+
   return (
     <View style={doc.page}>
       {/* Letterhead */}
@@ -58,23 +69,22 @@ function ProposalDocument() {
           <Text style={doc.companyMeta}>{CONTRACTOR.phone}  ·  {CONTRACTOR.email}</Text>
         </View>
       </View>
-
       <View style={doc.divider} />
 
       {/* Proposal header */}
       <View style={doc.section}>
         <View style={doc.proposalTitleRow}>
           <Text style={doc.proposalTitle}>PROPOSAL</Text>
-          <Text style={doc.proposalId}>#{PROJECT.proposalId}</Text>
+          <Text style={doc.proposalId}>#{propId}</Text>
         </View>
         <View style={doc.metaGrid}>
           {[
-            { label: 'Project',      value: PROJECT.title },
-            { label: 'Date',         value: PROJECT.date },
-            { label: 'Prepared for', value: CLIENT.name },
-            { label: 'Address',      value: CLIENT.address },
-            { label: 'Valid for',    value: `${PROJECT.validDays} days` },
-            { label: 'Timeline',     value: PROJECT.timeline },
+            { label: 'Project',      value: `${roomLabel} Remodel` },
+            { label: 'Date',         value: fmtDate() },
+            { label: 'Prepared for', value: client.name },
+            { label: 'Address',      value: client.address || '—' },
+            { label: 'Valid for',    value: `${VALID_DAYS} days` },
+            { label: 'Timeline',     value: `~${estimate.timeline_estimate_weeks ?? 4} weeks` },
           ].map(({ label, value }) => (
             <View key={label} style={doc.metaItem}>
               <Text style={doc.metaLabel}>{label}</Text>
@@ -83,7 +93,6 @@ function ProposalDocument() {
           ))}
         </View>
       </View>
-
       <View style={doc.divider} />
 
       {/* Scope of work */}
@@ -91,26 +100,30 @@ function ProposalDocument() {
         <Text style={doc.tableTitle}>SCOPE OF WORK</Text>
         <View style={doc.tableHeader}>
           <Text style={[doc.tableHeaderCell, { flex: 1 }]}>Description</Text>
-          <Text style={doc.tableHeaderCell}>Amount</Text>
+          <Text style={[doc.tableHeaderCell, { width: 72, textAlign: 'right' }]}>Amount</Text>
         </View>
-        {LINE_ITEMS.map((item, i) => (
-          <View key={item.label} style={[doc.tableRow, i % 2 === 1 && doc.tableRowAlt]}>
-            <Text style={[doc.tableCell, { flex: 1 }]}>{item.label}</Text>
-            <Text style={[doc.tableCell, doc.tableCellRight]}>{fmt(item.total)}</Text>
+        {lineItems.length > 0 ? lineItems.map((item, i) => (
+          <View key={item.item + i} style={[doc.tableRow, i % 2 === 1 && doc.tableRowAlt]}>
+            <View style={{ flex: 1 }}>
+              <Text style={doc.tableCell}>{item.item}</Text>
+              {!!item.scope && <Text style={[doc.tableCell, { fontSize: 10, color: '#94A3B8' }]}>{item.scope}</Text>}
+            </View>
+            <Text style={[doc.tableCell, doc.tableCellRight, { width: 72 }]}>{fmt(item.total)}</Text>
           </View>
-        ))}
+        )) : (
+          <Text style={[doc.tableCell, { padding: 8, color: '#94A3B8' }]}>No line items available.</Text>
+        )}
       </View>
-
       <View style={doc.divider} />
 
       {/* Cost summary */}
       <View style={doc.section}>
         <Text style={doc.tableTitle}>COST SUMMARY</Text>
         {[
-          { label: 'Materials',      value: SUMMARY.materials   },
-          { label: 'Labor',          value: SUMMARY.labor       },
-          { label: 'Permits & fees', value: SUMMARY.permits     },
-          { label: 'Contingency',    value: SUMMARY.contingency },
+          { label: 'Materials',      value: summary.materials   },
+          { label: 'Labor',          value: summary.labor       },
+          { label: 'Permits & fees', value: summary.permits     },
+          { label: 'Contingency',    value: summary.contingency },
         ].map(({ label, value }) => (
           <View key={label} style={doc.summaryRow}>
             <Text style={doc.summaryLabel}>{label}</Text>
@@ -119,21 +132,21 @@ function ProposalDocument() {
         ))}
         <View style={doc.totalRow}>
           <Text style={doc.totalLabel}>TOTAL ESTIMATE</Text>
-          <Text style={doc.totalValue}>{fmt(SUMMARY.total)}</Text>
+          <Text style={doc.totalValue}>{fmt(summary.total)}</Text>
         </View>
-        <Text style={doc.rangeNote}>
-          Estimated range: {fmt(SUMMARY.low)} – {fmt(SUMMARY.high)}
-        </Text>
+        {summary.low > 0 && summary.high > 0 && (
+          <Text style={doc.rangeNote}>
+            Estimated range: {fmt(summary.low)} – {fmt(summary.high)}
+          </Text>
+        )}
       </View>
-
       <View style={doc.divider} />
 
       {/* Payment terms */}
       <View style={doc.section}>
         <Text style={doc.tableTitle}>PAYMENT TERMS</Text>
-        <Text style={doc.paymentText}>{PROJECT.paymentTerms}</Text>
+        <Text style={doc.paymentText}>{PAYMENT_TERMS}</Text>
       </View>
-
       <View style={doc.divider} />
 
       {/* Signatures */}
@@ -145,7 +158,7 @@ function ProposalDocument() {
         </View>
         <View style={doc.sigBlock}>
           <View style={doc.sigLine} />
-          <Text style={doc.sigName}>{CLIENT.name}</Text>
+          <Text style={doc.sigName}>{client.name}</Text>
           <Text style={doc.sigRole}>Client</Text>
         </View>
       </View>
@@ -157,77 +170,124 @@ function ProposalDocument() {
 
 // ─── Action button ────────────────────────────────────────────────────────────
 function ActionBtn({
-  icon, label, sublabel, onPress, primary = false,
+  icon, label, sublabel, onPress, primary = false, loading = false, disabled = false,
 }: {
-  icon: string; label: string; sublabel?: string; onPress: () => void; primary?: boolean;
+  icon: string; label: string; sublabel?: string; onPress: () => void;
+  primary?: boolean; loading?: boolean; disabled?: boolean;
 }) {
   return (
     <Pressable
       style={({ pressed }) => [
         styles.actionBtn,
         primary && styles.actionBtnPrimary,
-        pressed && styles.actionBtnPressed,
+        (pressed || disabled) && styles.actionBtnPressed,
       ]}
       onPress={onPress}
+      disabled={disabled || loading}
     >
-      <Text style={styles.actionBtnIcon}>{icon}</Text>
+      {loading ? (
+        <ActivityIndicator color={Colors.primary} style={{ width: 32 }} />
+      ) : (
+        <Text style={styles.actionBtnIcon}>{icon}</Text>
+      )}
       <View style={styles.actionBtnTextWrap}>
         <Text style={[styles.actionBtnLabel, primary && styles.actionBtnLabelPrimary]}>
-          {label}
+          {loading ? 'Generating PDF…' : label}
         </Text>
-        {sublabel && <Text style={styles.actionBtnSublabel}>{sublabel}</Text>}
+        {sublabel && !loading && <Text style={styles.actionBtnSublabel}>{sublabel}</Text>}
       </View>
-      <Text style={styles.actionBtnChevron}>›</Text>
+      {!loading && <Text style={styles.actionBtnChevron}>›</Text>}
     </Pressable>
   );
 }
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 export default function ProposalScreen() {
+  const estimate    = getEstimateResult();
+  const jobId       = getEstimateJobId();
+  const storedClient = getProjectClient();
+  const client = {
+    ...FALLBACK_CLIENT,
+    ...(storedClient ? { name: storedClient.name, address: storedClient.address } : {}),
+  };
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  // Fallback proposal number for preview (no real ID until PDF is generated)
+  const propId = `GW-${new Date().getFullYear()}-${Date.now().toString().slice(-4)}`;
+
+  const summary = estimate ? {
+    total:  estimate.total_estimate ?? 0,
+    low:    estimate.estimate_range?.low ?? 0,
+    high:   estimate.estimate_range?.high ?? 0,
+    weeks:  estimate.timeline_estimate_weeks ?? 4,
+    room:   estimate.room_type.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+  } : null;
+
   const handleShare = async () => {
+    if (!summary) return;
     try {
       await Share.share({
-        title: `Proposal – ${PROJECT.title}`,
+        title: `Groundwork Proposal – ${summary.room} Remodel`,
         message:
-          `GROUNDWORK PROPOSAL\n${PROJECT.title} for ${CLIENT.name}\n${CLIENT.address}\n\n` +
-          `Total Estimate: ${fmt(SUMMARY.total)}\nRange: ${fmt(SUMMARY.low)} – ${fmt(SUMMARY.high)}\n\n` +
-          `Payment: ${PROJECT.paymentTerms}\nValid for ${PROJECT.validDays} days.\n\n` +
+          `GROUNDWORK PROPOSAL\n${summary.room} Remodel\n\n` +
+          `Total Estimate: ${fmt(summary.total)}\nRange: ${fmt(summary.low)} – ${fmt(summary.high)}\n\n` +
+          `Payment: ${PAYMENT_TERMS}\nValid for ${VALID_DAYS} days.\n\n` +
           `Prepared by ${CONTRACTOR.company} · ${CONTRACTOR.phone}`,
       });
     } catch {}
   };
 
   const handleText = () => {
+    if (!summary) return;
     const body = encodeURIComponent(
-      `Hi ${CLIENT.name.split(' ')[0]}, I've put together a proposal for your ${PROJECT.title}. ` +
-      `Total estimate: ${fmt(SUMMARY.total)} (range ${fmt(SUMMARY.low)}–${fmt(SUMMARY.high)}). ` +
-      `Valid for ${PROJECT.validDays} days. — ${CONTRACTOR.name}, ${CONTRACTOR.company}`
+      `Hi, I've put together a proposal for your ${summary.room} remodel. ` +
+      `Total estimate: ${fmt(summary.total)} (range ${fmt(summary.low)}–${fmt(summary.high)}). ` +
+      `Valid for ${VALID_DAYS} days. — ${CONTRACTOR.name}, ${CONTRACTOR.company}`
     );
-    Linking.openURL(`sms:${CLIENT.phone}?body=${body}`).catch(() =>
+    Linking.openURL(`sms:${client.phone || ''}?body=${body}`).catch(() =>
       Alert.alert('Unable to open Messages')
     );
   };
 
   const handleEmail = () => {
-    const subject = encodeURIComponent(`Proposal: ${PROJECT.title} – ${fmt(SUMMARY.total)}`);
+    if (!summary) return;
+    const subject = encodeURIComponent(`Proposal: ${summary.room} Remodel – ${fmt(summary.total)}`);
     const body = encodeURIComponent(
-      `Hi ${CLIENT.name.split(' ')[0]},\n\nPlease find your project proposal attached below.\n\n` +
-      `Project: ${PROJECT.title}\nTotal Estimate: ${fmt(SUMMARY.total)}\n` +
-      `Range: ${fmt(SUMMARY.low)} – ${fmt(SUMMARY.high)}\n` +
-      `Payment: ${PROJECT.paymentTerms}\nValid for: ${PROJECT.validDays} days\n\n` +
+      `Hi,\n\nPlease find your project proposal below.\n\n` +
+      `Project: ${summary.room} Remodel\nTotal Estimate: ${fmt(summary.total)}\n` +
+      `Range: ${fmt(summary.low)} – ${fmt(summary.high)}\n` +
+      `Payment: ${PAYMENT_TERMS}\nValid for: ${VALID_DAYS} days\n\n` +
       `Best,\n${CONTRACTOR.name}\n${CONTRACTOR.company}\n${CONTRACTOR.phone}`
     );
-    Linking.openURL(`mailto:${CLIENT.email}?subject=${subject}&body=${body}`).catch(() =>
+    Linking.openURL(`mailto:${client.email || ''}?subject=${subject}&body=${body}`).catch(() =>
       Alert.alert('Unable to open Mail')
     );
   };
 
-  const handleDownload = () => {
-    Alert.alert(
-      'PDF Generation',
-      'PDF export will be available once connected to the Groundwork backend.',
-      [{ text: 'OK' }]
-    );
+  const handleDownload = async () => {
+    if (!jobId) {
+      Alert.alert('No Estimate', 'Complete an analysis first to generate a proposal PDF.');
+      return;
+    }
+    try {
+      setPdfLoading(true);
+      const result = await groundworkApi.createProposal({
+        estimate_job_id: jobId,
+        contractor: CONTRACTOR,
+        client: client,
+        payment_terms: PAYMENT_TERMS,
+        valid_days: VALID_DAYS,
+      });
+      if (result.pdf_url) {
+        await Linking.openURL(result.pdf_url);
+      } else {
+        Alert.alert('PDF Ready', `Proposal ID: ${result.proposal_id}. PDF URL unavailable (S3 not configured).`);
+      }
+    } catch (err: any) {
+      Alert.alert('PDF Failed', err?.message ?? 'Could not generate PDF. Try again.');
+    } finally {
+      setPdfLoading(false);
+    }
   };
 
   return (
@@ -247,13 +307,21 @@ export default function ProposalScreen() {
           <Text style={styles.readyBadgeText}>✓</Text>
           <View>
             <Text style={styles.readyTitle}>Proposal Ready</Text>
-            <Text style={styles.readySub}>Review and send to {CLIENT.name}</Text>
+            <Text style={styles.readySub}>
+              {summary ? `${summary.room} · ${fmt(summary.total)}` : 'Review and send to client'}
+            </Text>
           </View>
         </Animated.View>
 
         {/* Document preview */}
         <Animated.View entering={FadeInDown.delay(160).duration(400)} style={styles.docWrap}>
-          <ProposalDocument />
+          {estimate ? (
+            <ProposalDocument estimate={estimate} propId={propId} client={client} />
+          ) : (
+            <View style={[doc.page, { alignItems: 'center', paddingVertical: 32 }]}>
+              <Text style={{ color: '#94A3B8', fontSize: 14 }}>No estimate data — run an analysis first.</Text>
+            </View>
+          )}
         </Animated.View>
 
         {/* Actions */}
@@ -262,13 +330,19 @@ export default function ProposalScreen() {
         </Animated.View>
 
         <Animated.View entering={FadeInUp.delay(320).duration(400)} style={styles.actionsCard}>
-          <ActionBtn icon="💬" label="Text Client"    sublabel={CLIENT.phone}  onPress={handleText}     primary />
+          <ActionBtn icon="💬" label="Text Client"   sublabel={client.phone || 'Add client phone'} onPress={handleText}  primary />
           <View style={styles.actionDivider} />
-          <ActionBtn icon="✉️" label="Email Client"   sublabel={CLIENT.email}  onPress={handleEmail} />
+          <ActionBtn icon="✉️" label="Email Client"  sublabel={client.email || 'Add client email'} onPress={handleEmail} />
           <View style={styles.actionDivider} />
-          <ActionBtn icon="⬇️" label="Download PDF"   sublabel="Save to Files" onPress={handleDownload} />
+          <ActionBtn
+            icon="⬇️" label="Download PDF"
+            sublabel="Generate & save to Files"
+            onPress={handleDownload}
+            loading={pdfLoading}
+            disabled={!jobId}
+          />
           <View style={styles.actionDivider} />
-          <ActionBtn icon="↗️" label="Share"           sublabel="AirDrop, Messages, more…" onPress={handleShare} />
+          <ActionBtn icon="↗️" label="Share"         sublabel="AirDrop, Messages, more…" onPress={handleShare} />
         </Animated.View>
 
         {/* Start new */}
@@ -307,7 +381,7 @@ const doc = StyleSheet.create({
   tableRow: { flexDirection: 'row', paddingHorizontal: 8, paddingVertical: 7 },
   tableRowAlt: { backgroundColor: '#F8FAFC', borderRadius: 4 },
   tableCell: { fontSize: 13, color: '#334155' },
-  tableCellRight: { fontWeight: '600', color: '#0F172A', textAlign: 'right', minWidth: 64 },
+  tableCellRight: { fontWeight: '600', color: '#0F172A', textAlign: 'right' },
   summaryRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   summaryLabel: { fontSize: 13, color: '#64748B' },
   summaryValue: { fontSize: 13, color: '#334155', fontWeight: '500' },
@@ -333,10 +407,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: 20, paddingBottom: 32, gap: 14 },
-
   sectionPad: { paddingHorizontal: 2 },
 
-  // Ready badge
   readyBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 14,
     backgroundColor: Colors.successBg,
@@ -353,7 +425,6 @@ const styles = StyleSheet.create({
   readyTitle: { fontSize: 16, fontWeight: '700', color: Colors.success },
   readySub: { fontSize: 13, color: Colors.textMuted, marginTop: 2 },
 
-  // Document wrapper
   docWrap: {
     borderRadius: 16, overflow: 'hidden',
     shadowColor: '#000',
@@ -362,7 +433,6 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
 
-  // Actions
   actionsCard: {
     backgroundColor: Colors.surface,
     borderRadius: 16, borderWidth: 1, borderColor: Colors.border,
@@ -382,7 +452,6 @@ const styles = StyleSheet.create({
   actionBtnChevron: { fontSize: 20, color: Colors.textSubtle, fontWeight: '300' },
   actionDivider: { height: 1, backgroundColor: Colors.border, marginLeft: 64 },
 
-  // New estimate
   newEstimateBtn: {
     alignItems: 'center', paddingVertical: 16,
     borderRadius: 16, borderWidth: 1, borderColor: Colors.border,

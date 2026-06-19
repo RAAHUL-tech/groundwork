@@ -9,6 +9,7 @@ class Config:
     FLASK_ENV = os.getenv('FLASK_ENV', 'development')
     SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret')
     DEBUG = FLASK_ENV == 'development'
+    RATELIMIT_ENABLED = FLASK_ENV != 'testing'
 
     # Redis
     REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
@@ -26,11 +27,10 @@ class Config:
     # AI APIs
     ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
     OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-    ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY', '')
-    ROBOFLOW_MODEL_ID = os.getenv('ROBOFLOW_MODEL_ID', 'construction-objects/3')
-
-    # Pricing
-    SERPAPI_KEY = os.getenv('SERPAPI_KEY', '')
+    
+    # Pricing — SerpApi Home Depot engine for live material prices
+    SERPAPI_KEY        = os.getenv('SERPAPI_KEY', '')
+    HD_PRICE_CACHE_TTL = int(os.getenv('SERPAPI_CACHE_TTL_SECONDS', str(6 * 3600)))  # 6hr
 
     # AWS S3
     AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
@@ -40,7 +40,6 @@ class Config:
 
     # Cache TTLs (seconds)
     ESTIMATE_CACHE_TTL = int(os.getenv('ESTIMATE_CACHE_TTL_SECONDS', '86400'))
-    SERPAPI_CACHE_TTL = int(os.getenv('SERPAPI_CACHE_TTL_SECONDS', '21600'))
 
     # Dev / testing fallback — hardcoded Supabase project used when no
     # project_id is supplied by the client (testing without auth).

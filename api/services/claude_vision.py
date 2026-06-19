@@ -97,6 +97,94 @@ Language mapping:
 Return ONLY the JSON array. No markdown, no explanation."""
 
 
+WORK_ITEMS_PROMPT = """You are a licensed residential general contractor finalizing the materials list for a renovation quote.
+
+Your earlier room walkthrough produced this analysis:
+Room type: {room_type}
+Condition: {condition}
+What you observed: {features_json}
+Scope assessment: {scope_observations}
+
+Homeowner's voice note: "{voice_transcript}"
+
+Based on what you SAW in the room and what the homeowner ASKED FOR, produce the definitive list of items to purchase at Home Depot for this job. Do not add items that are not visible or not mentioned — only include things clearly needed based on evidence.
+
+Return ONLY a valid JSON array:
+[
+  {{
+    "item": "EXACT_ITEM_KEY",
+    "action": "replace|repair|install|remove",
+    "qty": number_or_null,
+    "unit": "linear_ft|sq_ft|each|null",
+    "reason": "one sentence: why this item is needed",
+    "priority": "must|should|could"
+  }}
+]
+
+APPROVED ITEM KEYS — use exactly these strings:
+Kitchen:  cabinets, countertop, sink, range, dishwasher, refrigerator, microwave, flooring, backsplash, lighting_fixture, window, paint, drywall
+Bathroom: vanity, toilet, tub, shower, tile_floor, tile_wall, mirror, lighting_fixture, faucet, flooring, paint, drywall
+General:  flooring, drywall, window, door, lighting_fixture, paint, ceiling_fan, closet, ac_unit_removal, hvac_disconnect
+
+RULES:
+- Use the qty from your visual estimate when you have a reliable estimate; null otherwise
+- Voice note overrides visual when the homeowner explicitly mentions an item
+- Include paint ONLY if there is visible damage/discoloration or the homeowner requested it
+- Do NOT add generic items (flooring, paint) just to pad the list
+- Items the homeowner explicitly named take priority=must
+- Items you observed as poor/fair condition with replace recommendation = must or should
+- Items in good condition not mentioned = do not include
+
+Return ONLY the JSON array — no markdown, no explanation."""
+
+
+def generate_work_items(
+    classification: dict,
+    voice_transcript: str | None = None,
+    room_type: str = 'unknown',
+) -> list[dict]:
+    """
+    2nd Claude call: synthesize visual classification + voice intent → definitive
+    list of materials to buy for the renovation.
+
+    Returns list of {item, action, qty, unit, reason, priority}.
+    Falls back to [] on any error so the pipeline continues.
+    """
+    if not Config.ANTHROPIC_API_KEY:
+        logger.warning("[claude_vision] generate_work_items: ANTHROPIC_API_KEY not set")
+        return []
+
+    features = classification.get('detected_features', [])
+    features_text = json.dumps(features, indent=2) if features else 'No specific features identified'
+
+    prompt = WORK_ITEMS_PROMPT.format(
+        room_type=room_type,
+        condition=classification.get('condition', 'unknown'),
+        features_json=features_text[:1200],
+        scope_observations=(classification.get('scope_observations') or '')[:400],
+        voice_transcript=(voice_transcript or 'No voice note provided').strip()[:600],
+    )
+
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=900,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = response.content[0].text
+        logger.info("[claude_vision] work_items raw: %s", raw[:300])
+        items = _parse_json_array(raw)
+        items = [i for i in items if isinstance(i, dict) and i.get('item')]
+        logger.info("[claude_vision] ✓ work_items: %d — %s",
+                    len(items), [i['item'] for i in items])
+        return items
+    except Exception as exc:
+        logger.warning("[claude_vision] generate_work_items failed: %s", exc)
+        return []
+
+
 def extract_voice_scope(transcript: str, room_type: str = 'unknown') -> list[dict]:
     """
     Extract structured scope items from a Whisper transcript via Claude.
@@ -305,7 +393,10 @@ def _parse_json(raw: str) -> dict:
 
     # Direct parse
     try:
-        return json.loads(raw)
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise _JsonParseError(f"Expected JSON object, got {type(parsed).__name__}")
+        return parsed
     except json.JSONDecodeError:
         pass
 
@@ -313,7 +404,9 @@ def _parse_json(raw: str) -> dict:
     match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', raw)
     if match:
         try:
-            return json.loads(match.group(1))
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, dict):
+                return parsed
         except json.JSONDecodeError:
             pass
 
@@ -321,7 +414,9 @@ def _parse_json(raw: str) -> dict:
     match = re.search(r'\{[\s\S]*\}', raw)
     if match:
         try:
-            return json.loads(match.group(0))
+            parsed = json.loads(match.group(0))
+            if isinstance(parsed, dict):
+                return parsed
         except json.JSONDecodeError:
             pass
 

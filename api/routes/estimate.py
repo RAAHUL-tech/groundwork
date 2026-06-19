@@ -7,9 +7,13 @@ Flow (mobile):
   POST /estimate        → verify S3 object, enqueue pipeline, return job_id
   GET  /estimate/status/<job_id>  → poll until complete
 """
+import logging
+
 from flask import Blueprint, request, jsonify, g
 from app import limiter
 from middleware.auth import optional_auth
+
+logger = logging.getLogger(__name__)
 
 estimate_bp = Blueprint('estimate', __name__)
 
@@ -68,11 +72,12 @@ def create_estimate():
     s3_image_keys = [k for k in all_keys if not _is_video_key(k)]
     s3_video_key  = next((k for k in all_keys if _is_video_key(k)), None)
 
-    room_scan_id = data.get('room_scan_id') or None
-    project_id   = data.get('project_id') or None
-    tier         = data.get('tier', 'standard')
-    zip_code     = data.get('zip_code', '90210')
+    room_scan_id     = data.get('room_scan_id') or None
+    project_id       = data.get('project_id') or None
+    tier             = data.get('tier', 'standard')
+    zip_code         = data.get('zip_code', '90210')
     voice_transcript = data.get('voice_transcript')
+    s3_audio_key     = data.get('s3_audio_key') or None
 
     # Inherit project_id from room_scan when mobile only sent it at presign time
     if room_scan_id and not project_id:
@@ -115,6 +120,7 @@ def create_estimate():
         project_id=project_id,
         s3_image_keys=s3_image_keys,
         s3_video_key=s3_video_key,
+        s3_audio_key=s3_audio_key,
         room_scan_id=room_scan_id,
         user_id=user_id,
         ar_measurements=data.get('ar_measurements'),
@@ -181,3 +187,19 @@ def get_estimate_status(job_id: str):
 
     # RETRY or other transient states
     return jsonify({'job_id': job_id, 'status': task.state.lower()}), 200
+
+
+@estimate_bp.get('/estimates/recent')
+def list_recent():
+    """
+    Return the most recent estimates for the home screen.
+    Query param: limit (default 10, max 50)
+    """
+    limit = min(int(request.args.get('limit', 10)), 50)
+    try:
+        from models.supabase_models import list_recent_estimates
+        rows = list_recent_estimates(limit=limit)
+        return jsonify(rows), 200
+    except Exception as exc:
+        logger.warning("[estimate] list_recent failed: %s", exc)
+        return jsonify([]), 200

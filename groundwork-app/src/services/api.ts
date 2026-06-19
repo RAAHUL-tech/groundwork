@@ -1,4 +1,3 @@
-import * as FileSystem from 'expo-file-system/legacy';
 import { API_BASE_URL } from '@/constants/api';
 
 // ─── Generic fetch wrapper ────────────────────────────────────────────────────
@@ -45,13 +44,42 @@ export interface JobStatusResponse {
   error?: string;
 }
 
+export interface TierEstimate {
+  total: number;
+  range: { low: number; high: number };
+  subtotal_materials: number;
+  subtotal_labor: number;
+  permits: number;
+  contingency: number;
+  breakdown: LineItem[];
+  timeline_weeks: number;
+}
+
+export interface VisionDetectedFeature {
+  item: string;
+  estimated_qty: number | null;
+  unit: string | null;
+  condition: string;
+  notes?: string;
+}
+
+export interface WorkItem {
+  item: string;
+  action: string;
+  qty: number | null;
+  unit: string | null;
+  reason: string;
+  priority: 'must' | 'should' | 'could';
+}
+
 export interface EstimateResult {
   room_type: string;
   room_confidence: number;
   condition: string;
   condition_notes: string;
+  vision_detected_features: VisionDetectedFeature[];
   detected_items: DetectedItem[];
-  voice_scope_items: VoiceScopeItem[];
+  work_items: WorkItem[];
   estimate_breakdown: LineItem[];
   subtotal_materials: number;
   subtotal_labor: number;
@@ -59,6 +87,11 @@ export interface EstimateResult {
   contingency: number;
   total_estimate: number;
   estimate_range: { low: number; high: number };
+  tier_estimates?: {
+    economy: TierEstimate;
+    standard: TierEstimate;
+    premium: TierEstimate;
+  };
   confidence: {
     score: number;
     label: string;
@@ -69,6 +102,7 @@ export interface EstimateResult {
   regional_multiplier: number;
   scope_narrative: string;
   timeline_estimate_weeks: number;
+  zip_code?: string;
   _mock?: boolean;
 }
 
@@ -80,12 +114,6 @@ export interface DetectedItem {
   bounding_box?: { x: number; y: number; w: number; h: number };
 }
 
-export interface VoiceScopeItem {
-  item: string;
-  action: string;
-  source: string;
-  notes?: string;
-}
 
 export interface LineItem {
   item: string;
@@ -96,6 +124,69 @@ export interface LineItem {
   labor_unit_cost: number;
   total: number;
   hd_price_reference?: string;
+}
+
+export interface RecentEstimate {
+  id: string;
+  room_scan_id: string | null;
+  tier: string;
+  total_estimate: number;
+  estimate_low: number | null;
+  estimate_high: number | null;
+  confidence_score: number | null;
+  confidence_label: string | null;
+  scope_narrative: string | null;
+  timeline_weeks: number | null;
+  created_at: string;
+  // from room_scans join
+  room_type: string | null;
+  room_confidence: number | null;
+  condition: string | null;
+  room_label: string | null;
+  celery_job_id: string | null;
+  // full pipeline result — used to restore estimateStore on tap
+  raw_response: EstimateResult | null;
+}
+
+export interface ProposalResponse {
+  proposal_id: string;
+  pdf_url: string | null;
+  expires_at: string | null;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  client_name: string | null;
+  client_address: string | null;
+  status: string;
+  total_estimate: number | null;
+  created_at: string;
+}
+
+export interface ProjectRoom {
+  id: string;
+  room_label: string;
+  total_estimate: number;
+  room_scan_id: string | null;
+  estimate_id: string | null;
+  added_at: string;
+}
+
+export interface ProjectAggregate {
+  id: string;
+  name: string;
+  client_name: string | null;
+  client_address: string | null;
+  status: string;
+  created_at: string;
+  rooms: ProjectRoom[];
+  aggregate: {
+    room_count: number;
+    subtotal: number;
+    mobilization: number;
+    grand_total: number;
+  };
 }
 
 // ─── API calls ────────────────────────────────────────────────────────────────
@@ -122,6 +213,7 @@ export const groundworkApi = {
   startEstimate(body: {
     s3_key?: string;
     s3_keys?: string[];
+    s3_audio_key?: string;
     room_scan_id?: string | null;
     tier?: string;
     zip_code?: string;
@@ -140,36 +232,52 @@ export const groundworkApi = {
     return request<JobStatusResponse>(`/estimate/status/${jobId}`);
   },
 
-  /**
-   * Upload an audio file and get a Whisper transcript back.
-   * Uses FileSystem.uploadAsync (native multipart) — RN 0.76 FormData no longer
-   * supports the {uri, type, name} object shorthand for file parts.
-   */
-  async transcribeAudio(audioUri: string): Promise<string> {
-    const fileName = audioUri.split('/').pop() ?? 'voice.m4a';
-    const ext = fileName.includes('.') ? fileName.split('.').pop()! : 'm4a';
+  /** Fetch most recent estimates for the home screen. */
+  getRecentEstimates(limit = 10) {
+    return request<RecentEstimate[]>(`/estimates/recent?limit=${limit}`);
+  },
 
-    const result = await FileSystem.uploadAsync(
-      `${API_BASE_URL}/transcribe`,
-      audioUri,
-      {
-        uploadType: FileSystem.FileSystemUploadType.MULTIPART,
-        fieldName: 'audio',
-        mimeType: `audio/${ext}`,
-        httpMethod: 'POST',
-      },
-    );
-
-    if (result.status < 200 || result.status >= 300) {
-      throw new Error(`Transcription failed (${result.status}): ${result.body}`);
-    }
-
-    const data = JSON.parse(result.body);
-    return (data.transcript as string) ?? '';
+  /** Generate a PDF proposal from a completed estimate. */
+  createProposal(body: {
+    estimate_job_id: string;
+    contractor?: Record<string, string>;
+    client?: Record<string, string>;
+    payment_terms?: string;
+    valid_days?: number;
+  }) {
+    return request<ProposalResponse>('/proposal', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   },
 
   /** Health check — used to verify backend is reachable. */
   health() {
     return request<{ status: string }>('/health');
+  },
+
+  /** Fetch all projects for the project picker. */
+  getProjects() {
+    return request<Project[]>('/projects');
+  },
+
+  /** Get a single project with room list and aggregate. */
+  getProjectAggregate(projectId: string) {
+    return request<ProjectAggregate>(`/projects/${projectId}`);
+  },
+
+  /**
+   * Link a completed room scan to an existing project.
+   * Returns the updated project aggregate.
+   */
+  addRoomToProject(body: {
+    project_id: string;
+    estimate_job_id: string;
+    room_label?: string;
+  }) {
+    return request<ProjectAggregate>('/rooms', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
   },
 };

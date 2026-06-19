@@ -5,133 +5,78 @@ import { router } from 'expo-router';
 import Animated, { FadeIn, FadeInDown, LinearTransition } from 'react-native-reanimated';
 import { Colors } from '@/constants/colors';
 import { ScreenHeader, SectionLabel, ConfidenceBar, PrimaryButton } from '@/components';
+import { getEstimateResult } from '@/services/estimateStore';
+import type { LineItem, TierEstimate } from '@/services/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type Tier = 'economy' | 'standard' | 'premium';
 
-interface LineItemDef {
-  label: string;
-  scope: string;
-  qty: number;
-  unit: string;
-  hdRef?: string;
-  source: 'vision' | 'voice';
-  material: Record<Tier, number>;
-  labor: Record<Tier, number>;
-}
-
-// ─── Mock data ────────────────────────────────────────────────────────────────
-const LINE_ITEMS: LineItemDef[] = [
-  {
-    label: 'Cabinet replacement',
-    scope: 'Semi-custom cabinets, like-for-like swap',
-    qty: 18.5, unit: 'lin ft',
-    hdRef: '$159 – $210 / lin ft (Hampton Bay, Home Depot)',
-    source: 'vision',
-    material: { economy: 90,  standard: 180, premium: 380 },
-    labor:    { economy: 55,  standard: 65,  premium: 85  },
-  },
-  {
-    label: 'Quartz countertops',
-    scope: 'Full slab replacement, standard edge profile',
-    qty: 32, unit: 'sq ft',
-    hdRef: '$65 – $130 / sq ft (Home Depot installation)',
-    source: 'vision',
-    material: { economy: 45,  standard: 75,  premium: 130 },
-    labor:    { economy: 30,  standard: 35,  premium: 45  },
-  },
-  {
-    label: 'LVP flooring',
-    scope: 'Luxury vinyl plank, full room replacement',
-    qty: 210, unit: 'sq ft',
-    hdRef: '$2.50 – $8 / sq ft (Home Depot)',
-    source: 'vision',
-    material: { economy: 2.0, standard: 4.5, premium: 8.0 },
-    labor:    { economy: 3.5, standard: 4.0, premium: 5.0 },
-  },
-  {
-    label: 'Sink + faucet replacement',
-    scope: 'Drop-in sink with mid-range faucet',
-    qty: 1, unit: 'each',
-    hdRef: '$150 – $1,200 (Home Depot)',
-    source: 'vision',
-    material: { economy: 200, standard: 450, premium: 1200 },
-    labor:    { economy: 175, standard: 220, premium: 280  },
-  },
-  {
-    label: 'Interior painting',
-    scope: 'Walls + ceiling, 2 coats',
-    qty: 480, unit: 'sq ft',
-    source: 'vision',
-    material: { economy: 0.60, standard: 0.90, premium: 1.40 },
-    labor:    { economy: 1.80, standard: 2.20, premium: 2.80 },
-  },
-];
-
-const PERMIT_RATE = 0.08;
-const CONTINGENCY_RATE = 0.10;
-const CONFIDENCE = { score: 0.84, label: 'High', rangePct: 15 };
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function calcItem(item: LineItemDef, tier: Tier) {
-  const mat = item.material[tier] * item.qty;
-  const lab = item.labor[tier] * item.qty;
-  return { mat, lab, total: mat + lab };
-}
-
-function fmt(n: number) { return '$' + Math.round(n).toLocaleString(); }
-function fmtRate(n: number) { return n >= 10 ? '$' + Math.round(n) : '$' + n.toFixed(2); }
-
 const TIER_LABELS: Record<Tier, string> = {
   economy: 'Economy', standard: 'Standard', premium: 'Premium',
 };
-
 const TIER_DESCRIPTIONS: Record<Tier, string> = {
   economy:  'Builder-grade materials, competitive labor',
   standard: 'Mid-range materials, skilled trades',
   premium:  'High-end finishes, specialist craftsmen',
 };
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function fmt(n: number) { return '$' + Math.round(n).toLocaleString(); }
+function fmtRate(n: number) { return n >= 10 ? '$' + Math.round(n) : '$' + n.toFixed(2); }
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
-function TierSelector({ tier, onChange }: { tier: Tier; onChange: (t: Tier) => void }) {
+
+function TierCompare({
+  tiers,
+  selected,
+  onSelect,
+}: {
+  tiers: Record<Tier, TierEstimate>;
+  selected: Tier;
+  onSelect: (t: Tier) => void;
+}) {
   return (
     <View style={styles.tierCard}>
       <SectionLabel>Finish Tier</SectionLabel>
       <View style={styles.tierRow}>
-        {(['economy', 'standard', 'premium'] as Tier[]).map((t) => (
-          <Pressable
-            key={t}
-            style={[styles.tierTab, tier === t && styles.tierTabActive]}
-            onPress={() => onChange(t)}
-          >
-            <Text style={[styles.tierTabText, tier === t && styles.tierTabTextActive]}>
-              {TIER_LABELS[t]}
-            </Text>
-          </Pressable>
-        ))}
+        {(['economy', 'standard', 'premium'] as Tier[]).map((t) => {
+          const active = t === selected;
+          return (
+            <Pressable
+              key={t}
+              style={[styles.tierTab, active && styles.tierTabActive]}
+              onPress={() => onSelect(t)}
+            >
+              <Text style={[styles.tierTabLabel, active && styles.tierTabLabelActive]}>
+                {TIER_LABELS[t]}
+              </Text>
+              <Text style={[styles.tierTabTotal, active && styles.tierTabTotalActive]}>
+                {fmt(tiers[t].total)}
+              </Text>
+            </Pressable>
+          );
+        })}
       </View>
-      <Text style={styles.tierDesc}>{TIER_DESCRIPTIONS[tier]}</Text>
+      <Text style={styles.tierDesc}>{TIER_DESCRIPTIONS[selected]}</Text>
     </View>
   );
 }
 
-function LineItemRow({ item, tier }: { item: LineItemDef; tier: Tier; index: number }) {
+function LineItemRow({ item, index }: { item: LineItem; index: number }) {
   const [expanded, setExpanded] = useState(false);
-  const { mat, lab, total } = calcItem(item, tier);
+  const matTotal = item.material_unit_cost * item.qty;
+  const labTotal = item.labor_unit_cost * item.qty;
 
   return (
     <Animated.View layout={LinearTransition.springify()}>
-      <Pressable
-        style={styles.lineItem}
-        onPress={() => setExpanded((v) => !v)}
-      >
+      <Pressable style={styles.lineItem} onPress={() => setExpanded((v) => !v)}>
         <View style={styles.lineItemTop}>
           <View style={styles.lineItemLeft}>
-            <Text style={styles.lineItemLabel}>{item.label}</Text>
-            <Text style={styles.lineItemScope}>{item.scope}</Text>
+            <Text style={styles.lineItemLabel}>{item.item}</Text>
+            {item.scope ? <Text style={styles.lineItemScope}>{item.scope}</Text> : null}
           </View>
           <View style={styles.lineItemRight}>
-            <Text style={styles.lineItemTotal}>{fmt(total)}</Text>
+            <Text style={styles.lineItemTotal}>{fmt(item.total)}</Text>
             <Text style={styles.lineItemExpand}>{expanded ? '▲' : '▼'}</Text>
           </View>
         </View>
@@ -147,18 +92,18 @@ function LineItemRow({ item, tier }: { item: LineItemDef; tier: Tier; index: num
             <View style={styles.lineItemDetailRow}>
               <Text style={styles.lineItemDetailLabel}>Material</Text>
               <Text style={styles.lineItemDetailValue}>
-                {fmtRate(item.material[tier])} / {item.unit} = {fmt(mat)}
+                {fmtRate(item.material_unit_cost)}/{item.unit} = {fmt(matTotal)}
               </Text>
             </View>
             <View style={styles.lineItemDetailRow}>
               <Text style={styles.lineItemDetailLabel}>Labor</Text>
               <Text style={styles.lineItemDetailValue}>
-                {fmtRate(item.labor[tier])} / {item.unit} = {fmt(lab)}
+                {fmtRate(item.labor_unit_cost)}/{item.unit} = {fmt(labTotal)}
               </Text>
             </View>
-            {item.hdRef && (
+            {item.hd_price_reference && (
               <View style={styles.hdRef}>
-                <Text style={styles.hdRefText}>📦 {item.hdRef}</Text>
+                <Text style={styles.hdRefText}>🏠 {item.hd_price_reference}</Text>
               </View>
             )}
           </Animated.View>
@@ -171,20 +116,38 @@ function LineItemRow({ item, tier }: { item: LineItemDef; tier: Tier; index: num
 
 // ─── Screen ───────────────────────────────────────────────────────────────────
 export default function EstimateScreen() {
-  const [tier, setTier] = useState<Tier>('standard');
+  const raw = getEstimateResult();
+  const [tier, setTier] = useState<Tier>(() => {
+    const t = raw?.tier;
+    if (t === 'eco' || t === 'economy') return 'economy';
+    if (t === 'premium') return 'premium';
+    return 'standard';
+  });
 
-  const summary = useMemo(() => {
-    const items = LINE_ITEMS.map((item) => calcItem(item, tier));
-    const materials = items.reduce((s, i) => s + i.mat, 0);
-    const labor     = items.reduce((s, i) => s + i.lab, 0);
-    const subtotal  = materials + labor;
-    const permits   = subtotal * PERMIT_RATE;
-    const contingency = subtotal * CONTINGENCY_RATE;
-    const total     = subtotal + permits + contingency;
-    const low       = total * (1 - CONFIDENCE.rangePct / 100);
-    const high      = total * (1 + CONFIDENCE.rangePct / 100);
-    return { materials, labor, permits, contingency, total, low, high };
-  }, [tier]);
+  // Build tier data — prefer pre-computed tier_estimates from API;
+  // fall back to constructing from the primary result when not available.
+  const tiers = useMemo<Record<Tier, TierEstimate>>(() => {
+    if (raw?.tier_estimates) {
+      return raw.tier_estimates;
+    }
+    // Fallback: all 3 show the same tier (single-tier API response)
+    const fallback: TierEstimate = {
+      total:              raw?.total_estimate ?? 0,
+      range:              raw?.estimate_range ?? { low: 0, high: 0 },
+      subtotal_materials: raw?.subtotal_materials ?? 0,
+      subtotal_labor:     raw?.subtotal_labor ?? 0,
+      permits:            raw?.permits ?? 0,
+      contingency:        raw?.contingency ?? 0,
+      breakdown:          raw?.estimate_breakdown ?? [],
+      timeline_weeks:     raw?.timeline_estimate_weeks ?? 4,
+    };
+    return { economy: fallback, standard: fallback, premium: fallback };
+  }, [raw]);
+
+  const current = tiers[tier];
+  const confidence = raw?.confidence ?? { score: 0.75, label: 'Medium', range_pct: 20 };
+  const regionMultiplier = raw?.regional_multiplier ?? 1.0;
+  const zipCode = raw?.zip_code ?? '—';
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'bottom']}>
@@ -195,45 +158,51 @@ export default function EstimateScreen() {
       >
         {/* Header */}
         <Animated.View entering={FadeIn.duration(300)}>
-          <ScreenHeader title="Estimate" onBack={() => router.back()} />
+          <ScreenHeader
+            title={raw?.room_type
+              ? raw.room_type.charAt(0).toUpperCase() + raw.room_type.slice(1).replace(/_/g, ' ') + ' Estimate'
+              : 'Estimate'}
+            onBack={() => router.back()}
+          />
         </Animated.View>
 
         {/* Total hero */}
         <Animated.View entering={FadeInDown.delay(80).duration(400).springify()} style={styles.heroCard}>
           <SectionLabel>Total Estimate</SectionLabel>
-          <Text style={styles.heroTotal}>{fmt(summary.total)}</Text>
+          <Text style={styles.heroTotal}>{fmt(current.total)}</Text>
           <Text style={styles.heroRange}>
-            Range: {fmt(summary.low)} – {fmt(summary.high)}
+            Range: {fmt(current.range.low)} – {fmt(current.range.high)}
           </Text>
 
           <View style={styles.confRow}>
-            <ConfidenceBar confidence={CONFIDENCE.score} color={Colors.success} />
+            <ConfidenceBar confidence={confidence.score} color={Colors.success} />
             <View style={styles.confBadge}>
-              <Text style={styles.confBadgeText}>{Math.round(CONFIDENCE.score * 100)}% conf.</Text>
+              <Text style={styles.confBadgeText}>{Math.round(confidence.score * 100)}% conf.</Text>
             </View>
           </View>
 
+          {/* Materials / Labor / Timeline */}
           <View style={styles.heroMeta}>
             <View style={styles.heroMetaItem}>
-              <Text style={styles.heroMetaValue}>{fmt(summary.materials)}</Text>
+              <Text style={styles.heroMetaValue}>{fmt(current.subtotal_materials)}</Text>
               <Text style={styles.heroMetaLabel}>Materials</Text>
             </View>
             <View style={styles.heroMetaDivider} />
             <View style={styles.heroMetaItem}>
-              <Text style={styles.heroMetaValue}>{fmt(summary.labor)}</Text>
+              <Text style={styles.heroMetaValue}>{fmt(current.subtotal_labor)}</Text>
               <Text style={styles.heroMetaLabel}>Labor</Text>
             </View>
             <View style={styles.heroMetaDivider} />
             <View style={styles.heroMetaItem}>
-              <Text style={styles.heroMetaValue}>~4 wks</Text>
+              <Text style={styles.heroMetaValue}>~{current.timeline_weeks} wks</Text>
               <Text style={styles.heroMetaLabel}>Timeline</Text>
             </View>
           </View>
         </Animated.View>
 
-        {/* Tier selector */}
+        {/* Tier selector with live totals */}
         <Animated.View entering={FadeInDown.delay(160).duration(400).springify()}>
-          <TierSelector tier={tier} onChange={setTier} />
+          <TierCompare tiers={tiers} selected={tier} onSelect={setTier} />
         </Animated.View>
 
         {/* Line items */}
@@ -242,20 +211,26 @@ export default function EstimateScreen() {
         </Animated.View>
 
         <Animated.View entering={FadeInDown.delay(260).duration(400)} style={styles.lineItemsCard}>
-          {LINE_ITEMS.map((item, i) => (
-            <LineItemRow key={item.label} item={item} tier={tier} index={i} />
-          ))}
+          {current.breakdown.length > 0
+            ? current.breakdown.map((item, i) => (
+                <LineItemRow key={item.item + i} item={item} index={i} />
+              ))
+            : (
+              <View style={styles.emptyBreakdown}>
+                <Text style={styles.emptyBreakdownText}>No line items yet</Text>
+              </View>
+            )}
         </Animated.View>
 
-        {/* Summary table */}
+        {/* Cost summary */}
         <Animated.View entering={FadeInDown.delay(320).duration(400)} style={styles.summaryCard}>
           <SectionLabel>Cost Summary</SectionLabel>
           <View style={styles.summaryRows}>
             {[
-              { label: 'Materials',          value: summary.materials   },
-              { label: 'Labor',              value: summary.labor       },
-              { label: 'Permits (8%)',        value: summary.permits     },
-              { label: 'Contingency (10%)',   value: summary.contingency },
+              { label: 'Materials',        value: current.subtotal_materials },
+              { label: 'Labor',            value: current.subtotal_labor },
+              { label: 'Permits (8%)',     value: current.permits },
+              { label: 'Contingency (10%)',value: current.contingency },
             ].map(({ label, value }) => (
               <View key={label} style={styles.summaryRow}>
                 <Text style={styles.summaryRowLabel}>{label}</Text>
@@ -265,23 +240,26 @@ export default function EstimateScreen() {
             <View style={styles.summaryDivider} />
             <View style={styles.summaryRow}>
               <Text style={styles.summaryTotalLabel}>TOTAL</Text>
-              <Text style={styles.summaryTotalValue}>{fmt(summary.total)}</Text>
+              <Text style={styles.summaryTotalValue}>{fmt(current.total)}</Text>
             </View>
             <View style={[styles.summaryRow, { marginTop: 2 }]}>
               <Text style={styles.summaryRangeLabel}>Low estimate</Text>
-              <Text style={styles.summaryRangeValue}>{fmt(summary.low)}</Text>
+              <Text style={styles.summaryRangeValue}>{fmt(current.range.low)}</Text>
             </View>
             <View style={styles.summaryRow}>
               <Text style={styles.summaryRangeLabel}>High estimate</Text>
-              <Text style={styles.summaryRangeValue}>{fmt(summary.high)}</Text>
+              <Text style={styles.summaryRangeValue}>{fmt(current.range.high)}</Text>
             </View>
           </View>
         </Animated.View>
 
-        {/* Regional note */}
+        {/* Regional / pricing note */}
         <Animated.View entering={FadeInDown.delay(380).duration(400)} style={styles.regionNote}>
           <Text style={styles.regionNoteText}>
-            💡 Prices reflect national averages. Regional multiplier applied at proposal stage based on ZIP code.
+            📍 ZIP {zipCode} · {regionMultiplier.toFixed(2)}× regional cost multiplier applied
+            {raw?.tier_estimates
+              ? '  ·  Live Home Depot pricing where available'
+              : '  ·  RSMeans national average pricing'}
           </Text>
         </Animated.View>
       </ScrollView>
@@ -302,7 +280,6 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.background },
   scroll: { flex: 1 },
   scrollContent: { paddingHorizontal: 20, paddingBottom: 24, gap: 12 },
-
   sectionPad: { paddingHorizontal: 2 },
 
   // Hero
@@ -336,22 +313,20 @@ const styles = StyleSheet.create({
   },
   tierRow: { flexDirection: 'row', gap: 8 },
   tierTab: {
-    flex: 1, paddingVertical: 10, borderRadius: 10,
-    backgroundColor: Colors.surfaceRaised,
-    alignItems: 'center',
+    flex: 1, paddingVertical: 10, paddingHorizontal: 4,
+    borderRadius: 10, backgroundColor: Colors.surfaceRaised,
+    alignItems: 'center', gap: 3,
     borderWidth: 1, borderColor: 'transparent',
   },
   tierTabActive: {
-    backgroundColor: Colors.primary,
-    borderColor: Colors.primary,
-    shadowColor: Colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
+    backgroundColor: Colors.primary, borderColor: Colors.primary,
+    shadowColor: Colors.primary, shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
   },
-  tierTabText: { fontSize: 13, fontWeight: '700', color: Colors.textMuted },
-  tierTabTextActive: { color: Colors.white },
+  tierTabLabel: { fontSize: 11, fontWeight: '700', color: Colors.textMuted },
+  tierTabLabelActive: { color: 'rgba(255,255,255,0.85)' },
+  tierTabTotal: { fontSize: 13, fontWeight: '800', color: Colors.text },
+  tierTabTotalActive: { color: Colors.white },
   tierDesc: { fontSize: 13, color: Colors.textSubtle, textAlign: 'center' },
 
   // Line items
@@ -379,6 +354,8 @@ const styles = StyleSheet.create({
   hdRef: { marginTop: 4, backgroundColor: Colors.background, borderRadius: 8, padding: 8 },
   hdRefText: { fontSize: 11, color: Colors.textSubtle },
   lineItemDivider: { height: 1, backgroundColor: Colors.border, marginLeft: 16 },
+  emptyBreakdown: { padding: 24, alignItems: 'center' },
+  emptyBreakdownText: { fontSize: 14, color: Colors.textSubtle },
 
   // Summary
   summaryCard: {
@@ -402,7 +379,7 @@ const styles = StyleSheet.create({
     borderRadius: 12, borderWidth: 1, borderColor: Colors.border,
     padding: 14,
   },
-  regionNoteText: { fontSize: 13, color: Colors.textSubtle, lineHeight: 19 },
+  regionNoteText: { fontSize: 12, color: Colors.textSubtle, lineHeight: 19 },
 
   // CTA
   ctaWrap: {
