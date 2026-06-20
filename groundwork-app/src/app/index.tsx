@@ -113,7 +113,7 @@ export default function HomeScreen() {
     else setLoading(true);
     setError(null);
     try {
-      const data = await groundworkApi.getRecentEstimates(10);
+      const data = await groundworkApi.getRecentEstimates(3);
       setEstimates(data);
     } catch (err: any) {
       setError('Could not load estimates.');
@@ -230,6 +230,16 @@ export default function HomeScreen() {
               onPress={() => handleCardPress(est)}
             />
           ))}
+
+          {!loading && !error && (
+            <Pressable
+              style={({ pressed }) => [styles.projectsBtn, pressed && { opacity: 0.7 }]}
+              onPress={() => router.push('/projects' as any)}
+            >
+              <Text style={styles.projectsBtnText}>View All Projects</Text>
+              <Text style={styles.projectsBtnChevron}>›</Text>
+            </Pressable>
+          )}
         </View>
 
         {/* Feature chips */}
@@ -314,6 +324,16 @@ const styles = StyleSheet.create({
   errorRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 12 },
   errorText: { fontSize: 14, color: Colors.textMuted, flex: 1 },
   retryText: { fontSize: 14, fontWeight: '600', color: Colors.primary },
+
+  // Projects button
+  projectsBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: Colors.surface,
+    borderRadius: 12, borderWidth: 1, borderColor: Colors.border,
+    paddingVertical: 14, paddingHorizontal: 16, marginTop: 4,
+  },
+  projectsBtnText: { fontSize: 15, fontWeight: '600', color: Colors.primary },
+  projectsBtnChevron: { fontSize: 20, color: Colors.primary, fontWeight: '300' },
 
   // Feature chips
   featureRow: { flexDirection: 'row', gap: 10, paddingHorizontal: 24, marginTop: 28 },

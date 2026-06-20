@@ -13,7 +13,7 @@ from config import Config
 logger = logging.getLogger(__name__)
 
 MAX_IMAGES = 5      # cap for cost and latency
-MAX_TOKENS = 1500
+MAX_TOKENS = 2048
 
 CLASSIFICATION_PROMPT = """You are a licensed residential general contractor doing a site walkthrough to price a remodel. You have 20 years of experience estimating kitchens, bathrooms, and whole-home renovations.
 

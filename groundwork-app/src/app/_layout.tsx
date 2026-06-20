@@ -20,6 +20,8 @@ export default function RootLayout() {
         <Stack.Screen name="result" />
         <Stack.Screen name="estimate" />
         <Stack.Screen name="proposal" />
+        <Stack.Screen name="projects" />
+        <Stack.Screen name="project/[id]" />
       </Stack>
     </>
   );
