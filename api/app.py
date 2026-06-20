@@ -31,7 +31,9 @@ def create_app() -> Flask:
     'http://localhost:19006',
     'exp://localhost:8081',
     'https://*.supabase.co',
-    'https://*.railway.app',       
+    'https://*.railway.app',
+    'https://*.rlwy.net',
+    'http://*.rlwy.net'
 ])
 
     # ── Rate limiting (Redis-backed) ──────────────────────────────────────────
