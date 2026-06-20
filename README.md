@@ -24,6 +24,10 @@ The first problem — **getting the estimate right, fast** — is what Groundwor
 4. Contractor receives a line-item estimate broken down by material + labor across Economy / Standard / Premium tiers
 5. One tap generates a PDF proposal ready to text or email to the client
 
+
+https://github.com/user-attachments/assets/03de1435-6099-4185-af45-47e0bd57344e
+
+
 ---
 
 ## Architecture
