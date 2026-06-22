@@ -34,12 +34,12 @@ https://github.com/user-attachments/assets/03de1435-6099-4185-af45-47e0bd57344e
 
 ```
 ┌─────────────────────────────────────────────────┐
-│              Mobile App (Expo / React Native)    │
+│              Mobile App (Expo / React Native)   │
 │  Camera → Voice Record → Upload → Poll → Review │
 └────────────────────┬────────────────────────────┘
                      │ HTTPS
                      ▼
-┌─────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
 │              Flask API (Railway)                 │
 │  POST /upload/presign  → S3 presigned URL        │
 │  POST /estimate        → enqueue job, return ID  │
@@ -51,13 +51,13 @@ https://github.com/user-attachments/assets/03de1435-6099-4185-af45-47e0bd57344e
            │ Celery task              │ read result
            ▼                          ▼
 ┌────────────────────┐   ┌────────────────────────┐
-│  Redis (Railway)   │   │  Redis result cache     │
-│  Task broker       │   │  TTL: 24 hr per job     │
+│  Redis (Railway)   │   │  Redis result cache    │
+│  Task broker       │   │  TTL: 24 hr per job    │
 └────────┬───────────┘   └────────────────────────┘
          │ consume
          ▼
 ┌─────────────────────────────────────────────────┐
-│              Celery Worker (Railway)             │
+│              Celery Worker (Railway)            │
 │                                                 │
 │  Step 1  — Claude Vision (claude-sonnet-4-6)    │
 │            Room classification + condition      │
@@ -89,7 +89,7 @@ https://github.com/user-attachments/assets/03de1435-6099-4185-af45-47e0bd57344e
 └──────────┬──────────────────────────────────────┘
            │
            ▼
-┌──────────────────────┐   ┌────────────────────────┐
+┌──────────────────────┐   ┌─────────────────────────┐
 │  Supabase (Postgres) │   │  AWS S3                 │
 │  projects            │   │  uploads/images/        │
 │  room_scans          │   │  uploads/videos/        │
@@ -97,7 +97,7 @@ https://github.com/user-attachments/assets/03de1435-6099-4185-af45-47e0bd57344e
 │  estimate_line_items │   │  proposals/             │
 │  proposals           │   │  preprocessed/          │
 │  project_rooms       │   │                         │
-└──────────────────────┘   └────────────────────────┘
+└──────────────────────┘   └─────────────────────────┘
 ```
 
 ---
