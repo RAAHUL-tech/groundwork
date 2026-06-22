@@ -48,6 +48,9 @@ def _get_pipeline():
     return _pipe
 
 
+MAX_DEPTH_PX = 518  # Depth Anything V2 training resolution; larger = OOM on CPU
+
+
 def estimate_depth_map(image_b64: str) -> tuple[np.ndarray, int, int]:
     """
     Return (disparity_map, img_w, img_h).
@@ -61,6 +64,14 @@ def estimate_depth_map(image_b64: str) -> tuple[np.ndarray, int, int]:
     img_bytes = b64decode(image_b64)
     image = Image.open(__import__('io').BytesIO(img_bytes)).convert('RGB')
     img_w, img_h = image.size
+
+    # Downscale to model's native resolution before inference.
+    # ViT self-attention is O(n²) in patch count — full 1080p causes OOM on CPU.
+    if max(img_w, img_h) > MAX_DEPTH_PX:
+        scale = MAX_DEPTH_PX / max(img_w, img_h)
+        new_w, new_h = max(1, int(img_w * scale)), max(1, int(img_h * scale))
+        image = image.resize((new_w, new_h), Image.BILINEAR)
+        logger.info("[depth] resized to %dx%d for inference (was %dx%d)", new_w, new_h, img_w, img_h)
 
     t0 = time.monotonic()
     output = pipe(image)

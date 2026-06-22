@@ -409,6 +409,14 @@ def _run(
         _done(s, ok=False, detail=str(exc))
         logger.error("[vision_pipeline] YOLO detection failed: %s", exc)
 
+    # Free YOLO from RAM before loading Depth Anything — both models can't coexist on small instances
+    try:
+        from services.yolo_detect import release_model as _yolo_release
+        _yolo_release()
+        logger.info("[vision_pipeline] YOLO model released from RAM")
+    except Exception:
+        pass
+
     # ── Step 3: Depth estimation → floor area + object dimensions ────────────
     s = _step("Step 3 — Depth Anything V2 (floor area + object dims)")
     logger.info("[vision_pipeline] %s ...", s['name'])

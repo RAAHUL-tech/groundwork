@@ -55,6 +55,15 @@ def _get_model():
     return _model
 
 
+def release_model():
+    """Unload YOLO from RAM. Call after detection is done to free memory for depth model."""
+    import gc
+    global _model
+    with _lock:
+        _model = None
+    gc.collect()
+
+
 def detect_objects(image_b64: str) -> list[dict]:
     """
     Run YOLOv8s on a base64-encoded JPEG image.
