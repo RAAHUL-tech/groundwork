@@ -12,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Pre-download Whisper small model so first /transcribe call is instant
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8')"
+# Pre-download Whisper tiny model (~40 MB int8) — fits in RAM alongside YOLO + Depth
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8')"
 
 # Pre-download YOLOv8s weights (~22 MB)
 RUN python -c "from ultralytics import YOLO; YOLO('yolov8s.pt')"

@@ -1,6 +1,6 @@
 """
 Local Whisper transcription using faster-whisper (CTranslate2 backend).
-Model: whisper-small (~460 MB, downloads on first use, cached in ~/.cache).
+Model: whisper-tiny int8 (~40 MB) — small enough to coexist with YOLO + Depth in RAM.
 No external API calls — runs entirely on CPU inside the Docker container.
 """
 import logging
@@ -21,9 +21,9 @@ def _get_model():
         with _lock:
             if _model is None:
                 from faster_whisper import WhisperModel
-                logger.info("[whisper] loading 'small' model — first call downloads weights if needed...")
+                logger.info("[whisper] loading 'tiny' model — first call downloads weights if needed...")
                 t0 = time.monotonic()
-                _model = WhisperModel("small", device="cpu", compute_type="int8")
+                _model = WhisperModel("tiny", device="cpu", compute_type="int8")
                 logger.info("[whisper] ✓ model ready in %.1fs", time.monotonic() - t0)
     return _model
 
@@ -43,7 +43,7 @@ def transcribe(audio_bytes: bytes, file_ext: str = "m4a") -> str:
 
     try:
         t0 = time.monotonic()
-        segments, info = model.transcribe(tmp_path, language="en", beam_size=5)
+        segments, info = model.transcribe(tmp_path, language="en", beam_size=2)
         # faster-whisper returns a generator — consume it before the temp file is deleted
         text = " ".join(seg.text for seg in segments).strip()
         elapsed_ms = (time.monotonic() - t0) * 1000
