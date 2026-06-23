@@ -420,7 +420,7 @@ def _calc_tier(
 def calculate_all_tiers(
     detected_items: list[dict],
     room_type: str,
-    zip_code: str = "90210",
+    zip_code: str = "92831",
     scope_narrative: str = "",
 ) -> dict[str, dict]:
     """
@@ -446,7 +446,7 @@ def calculate_estimate(
     detected_items: list[dict],
     room_type: str,
     tier: str = "standard",
-    zip_code: str = "90210",
+    zip_code: str = "92831",
     scope_narrative: str = "",
 ) -> dict:
     """
