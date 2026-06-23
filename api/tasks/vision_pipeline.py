@@ -5,6 +5,7 @@ from typing import Optional
 from celery_worker import celery_app
 from logging_config import configure_logging
 from services.pricing_engine import get_regional_multiplier
+from models.supabase_models import create_estimate, bulk_create_line_items, update_room_scan, get_room_scan
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -81,7 +82,6 @@ def _resolve_project_id(project_id: str | None, room_scan_id: str | None) -> str
         return project_id
     if room_scan_id:
         try:
-            from models.supabase_models import get_room_scan
             scan = get_room_scan(room_scan_id)
             if scan and scan.get('project_id'):
                 logger.info("[vision_pipeline] inherited project_id=%s from room_scan", scan['project_id'])
@@ -102,10 +102,6 @@ def _persist_result(
 ) -> None:
     """Write the pipeline result to Supabase estimates + line_items tables."""
     try:
-        from models.supabase_models import (
-            create_estimate, bulk_create_line_items, update_room_scan,
-        )
-
         project_id = _resolve_project_id(project_id, room_scan_id)
         conf = result.get('confidence', {})
         er = result.get('estimate_range', {})
