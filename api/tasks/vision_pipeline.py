@@ -167,7 +167,9 @@ def _persist_result(
         logger.info("[vision_pipeline] persisted estimate=%s", estimate['id'])
 
     except Exception as exc:
-        logger.error("[vision_pipeline] failed to persist to Supabase: %s", exc)
+        import traceback
+        logger.error("[vision_pipeline] failed to persist to Supabase: %s\n%s",
+                     exc, traceback.format_exc())
 
 
 def _compute_confidence(

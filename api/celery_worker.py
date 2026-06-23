@@ -1,3 +1,12 @@
+import os
+import sys
+
+# Ensure the api/ root is always on sys.path regardless of how the worker is launched.
+# Forked Celery workers can inherit a stripped sys.path that drops CWD ('').
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
 from celery import Celery
 from config import Config
 from logging_config import configure_logging
